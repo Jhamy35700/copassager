@@ -1,0 +1,28 @@
+workflows:
+  copassager-cloud-build:
+    name: Compilation CoPassager (Android & iOS)
+    instance_type: mac_mini_m1
+    environment:
+      flutter: stable
+      xcode: latest
+    scripts:
+      - name: Obtenir les paquets Flutter
+        script: |
+          flutter pub get
+      - name: Compiler Android (APK pour ton Oppo)
+        script: |
+          flutter build apk --release
+      - name: Compiler iOS (Sans signature pour test)
+        script: |
+          # On compile sans signature d'abord pour vérifier que le code est 100% compatible iOS
+          flutter build ios --release --no-codesign
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/ios/iphoneos/Runner.app
+    publishing:
+      email:
+        recipients:
+          - ton.email@exemple.com # REMPLACE PAR TON ADRESSE MAIL
+        notify:
+          success: true
+          failure: true
