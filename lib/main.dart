@@ -16,8 +16,8 @@ void main() async {
   
   // INITIALISATION SUPABASE (Remplace par tes vraies clés !)
   await Supabase.initialize(
-    url: 'https://xyzcompany.supabase.co', 
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...', 
+    url: 'https://nfufnqxkgjzhmqbzuhec.supabase.co', 
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mdWZucXhrZ2p6aG1xYnp1aGVjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5NTQ0MjYsImV4cCI6MjA4ODUzMDQyNn0.YuFMcYw7vVDY9bADyMV9EhykunZywIfKWHmQ1eOQB3g', 
   );
   
   const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
