@@ -232,15 +232,24 @@ class _MainLogicState extends State<MainLogic> {
     });
   }
 
-  void _connectToPeer(Map<String, dynamic> room) async {
-    setState(() { _activeRoom = room; _currentStep = 5; });
+void _connectToPeer(Map<String, dynamic> room) async {
+    _activeRoom = room;
+    
+    // 👇 NOUVEAU : On lance le chargement des messages Cloud
+    _loadHistoryFromCloud(room['id']);
+    
+    setState(() { _currentStep = 5; });
+    
+    // Si c'est un salon Cloud, on s'arrête là (pas besoin de Bluetooth)
     if (room['isMine'] == true || room['isOnline'] == true) return;
+    
+    // Sinon, on tente la connexion Bluetooth Nearby
     try {
       await Nearby().requestConnection(
         user['name']!, room['id'],
         onConnectionInitiated: (id, info) => Nearby().acceptConnection(id, onPayLoadRecieved: _onPayloadReceived),
         onConnectionResult: (id, status) { if (status == Status.CONNECTED) _connectedPeerId = id; },
-        onDisconnected: (id) => setState(() => _connectedPeerId = null) // Requis
+        onDisconnected: (id) => setState(() => _connectedPeerId = null)
       );
     } catch (e) { dev.log("Erreur connexion", error: e); }
   }
@@ -259,6 +268,29 @@ class _MainLogicState extends State<MainLogic> {
           } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur Cloud: $e"), backgroundColor: Colors.red)); }
       })
     ).then((_) => setState(() => _isModalOpen = false));
+  }
+
+  // Charge l'historique depuis Supabase
+  Future<void> _loadHistoryFromCloud(String roomId) async {
+    try {
+      final data = await Supabase.instance.client
+          .from('messages')
+          .select()
+          .eq('room_id', roomId)
+          .order('created_at', ascending: true);
+      
+      dev.log("Données reçues pour $roomId: ${data.length} messages");
+      
+      setState(() {
+        _history[roomId] = data.map<String>((m) {
+          // Si le nom correspond au nôtre, on met "Moi", sinon "Passager"
+          String prefix = m['sender_name'] == user['name'] ? "Moi: " : "Passager: ";
+          return "$prefix${m['content']}";
+        }).toList();
+      });
+    } catch (e) {
+      dev.log("Erreur historique cloud: $e");
+    }
   }
 
   @override
