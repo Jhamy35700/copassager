@@ -6,6 +6,7 @@ import 'dart:developer' as dev;
 import 'dart:typed_data';
 import 'dart:io' show Platform;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 // --- INITIALISATION DES NOTIFICATIONS ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -13,7 +14,7 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterL
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // INITIALISATION SUPABASE (Remplace par tes clés)
+  // INITIALISATION SUPABASE (Remplace par tes vraies clés !)
   await Supabase.initialize(
     url: 'https://xyzcompany.supabase.co', 
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...', 
@@ -47,7 +48,7 @@ class CoPassagerApp extends StatelessWidget {
           seedColor: const Color(0xFF6366f1),
           brightness: Brightness.light,
         ),
-        cardTheme: CardThemeData( // Ajoute "Data" ici
+        cardTheme: CardThemeData( 
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
@@ -106,7 +107,8 @@ class _MainLogicState extends State<MainLogic> {
   bool _isServiceRunning = false;
   bool _isSyncing = false;
   String _activeFilter = 'TOUS';
-  
+  String _appVersion = "0.0.0"; // Variable de version
+
   Map<String, String> user = {"name": "", "transport": "avion", "tripId": ""};
   Map<String, dynamic>? _activeRoom;
   
@@ -119,15 +121,43 @@ class _MainLogicState extends State<MainLogic> {
     {"id": "test_3", "author": "Luc", "title": "Partage frais Flixbus", "desc": "Billets de groupe", "type": "OFFRE", "transport": "autocar", "isOnline": true, "isFake": true},
   ];
 
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion(); // Chargement de la version au démarrage
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      setState(() {
+        _appVersion = "${packageInfo.version}+${packageInfo.buildNumber}";
+      });
+    } catch (e) {
+      dev.log("Erreur lors du chargement de la version: $e");
+    }
+  }
+
   List<String> _getMessagesFor(String roomId) => _history.putIfAbsent(roomId, () => []);
 
   Future<void> _showNotification(String title, String body) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'copassager_channel_id', 'Messages CoPassager',
-      importance: Importance.max, priority: Priority.high,
+      'copassager_channel_id', 
+      'Messages CoPassager',
+      importance: Importance.max, 
+      priority: Priority.high,
     );
-    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails());
-    await flutterLocalNotificationsPlugin.show(id: 0, title: title, body: body, notificationDetails: platformDetails);
+    const NotificationDetails platformDetails = NotificationDetails(
+      android: androidDetails, 
+      iOS: DarwinNotificationDetails()
+    );
+    
+    await flutterLocalNotificationsPlugin.show(
+      id: 0, 
+      title: title, 
+      body: body, 
+      notificationDetails: platformDetails
+    );
   }
 
   void _onPayloadReceived(String id, Payload payload) {
@@ -233,7 +263,16 @@ class _MainLogicState extends State<MainLogic> {
       case 3: return _TripStep(user: user, onJoin: _startNearby);
       case 4: 
         List<Map<String, dynamic>> filtered = _rooms.where((r) => _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter).toList();
-        return _DashboardStep(user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, onFilterChanged: (f) => setState(() => _activeFilter = f), onAdd: _openModal, onSelect: _connectToPeer);
+        return _DashboardStep(
+          user: user, 
+          rooms: filtered, 
+          isSync: _isSyncing, 
+          activeFilter: _activeFilter,
+          appVersion: _appVersion, // <-- Transmission du numéro de version ici
+          onFilterChanged: (f) => setState(() => _activeFilter = f), 
+          onAdd: _openModal, 
+          onSelect: _connectToPeer
+        );
       case 5: 
         return _ChatStep(room: _activeRoom!, messages: _getMessagesFor(_activeRoom!['id']), onSend: (v) {
           setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
@@ -323,8 +362,8 @@ class _DashboardStep extends StatelessWidget {
   final Function(String) onFilterChanged;
   final VoidCallback onAdd;
   final Function(Map<String, dynamic>) onSelect;
+  final String appVersion;
 
-  // CORRECTION : 'required' bien écrit et suppression du 'super.key' inutile
   const _DashboardStep({
     required this.user, 
     required this.rooms, 
@@ -332,6 +371,7 @@ class _DashboardStep extends StatelessWidget {
     required this.activeFilter, 
     required this.onFilterChanged, 
     required this.onAdd, 
+    required this.appVersion,
     required this.onSelect
   });
 
@@ -350,7 +390,21 @@ class _DashboardStep extends StatelessWidget {
             const CircleAvatar(radius: 25, backgroundColor: Colors.white24, child: Icon(Icons.person, color: Colors.white, size: 30)),
             const SizedBox(width: 15),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Bonjour,', style: TextStyle(color: Colors.white70)),
+              Row(
+                children: [
+                  const Text('Bonjour,', style: TextStyle(color: Colors.white70)),
+                  const SizedBox(width: 8),
+                  // Le fameux badge de version !
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(5),
+                    ),
+                    child: Text(appVersion, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
               Text(user['name']!, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
             ])),
             if (isSync) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
@@ -417,6 +471,7 @@ class _DashboardStep extends StatelessWidget {
     );
   }
 }
+
 class _ChatStep extends StatelessWidget {
   final Map<String, dynamic> room;
   final List<String> messages;
@@ -490,6 +545,7 @@ class _CreateModalState extends State<_CreateModal> {
   @override
   void initState() {
     super.initState();
+    // Le transport par défaut s'adapte au filtre actuellement sélectionné dans le Dashboard
     _selectedTransport = widget.activeFilter == 'TOUS' ? 'avion' : widget.activeFilter.toLowerCase();
   }
 
