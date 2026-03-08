@@ -1,29 +1,67 @@
 import 'package:flutter/material.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:developer' as dev;
 import 'dart:typed_data';
-import 'dart:io' show Platform; // L'import est correctement placé en haut du fichier
+import 'dart:io' show Platform;
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-void main() => runApp(const CoPassagerApp());
+// --- INITIALISATION DES NOTIFICATIONS ---
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // INITIALISATION SUPABASE (Remplace par tes clés)
+  await Supabase.initialize(
+    url: 'https://xyzcompany.supabase.co', 
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...', 
+  );
+  
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const DarwinInitializationSettings initializationSettingsIOS = DarwinInitializationSettings();
+  const InitializationSettings initializationSettings = InitializationSettings(
+    android: initializationSettingsAndroid,
+    iOS: initializationSettingsIOS,
+  );
+  
+  await flutterLocalNotificationsPlugin.initialize(
+    settings: initializationSettings,
+  );
+
+  runApp(const CoPassagerApp());
+}
 
 class CoPassagerApp extends StatelessWidget {
   const CoPassagerApp({super.key});
+  
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'CoPassager',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        useMaterial3: true, 
-        colorSchemeSeed: const Color(0xFF6366f1)
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF6366f1),
+          brightness: Brightness.light,
+        ),
+        cardTheme: CardThemeData( // Ajoute "Data" ici
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide(color: Colors.grey.shade200),
+          ),
+          color: Colors.white,
+        ),
       ),
       home: const SplashScreen(),
     );
   }
 }
 
-// --- 1. SPLASH SCREEN (1s de fluidité) ---
+// --- 1. SPLASH SCREEN ---
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
   @override
@@ -34,19 +72,25 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    // RÈGLE : Délai de 1s au démarrage
-    Future.delayed(const Duration(seconds: 1), () {
+    Future.delayed(const Duration(seconds: 2), () {
       if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const MainLogic()));
     });
   }
   @override
-  Widget build(BuildContext context) => Scaffold(body: Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-    const Text('🤝', style: TextStyle(fontSize: 80)),
-    ShaderMask(
-      shaderCallback: (bounds) => const LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF3b82f6)]).createShader(bounds),
-      child: const Text('CoPassager', style: TextStyle(fontSize: 40, fontWeight: FontWeight.w900, color: Colors.white)),
+  Widget build(BuildContext context) => Scaffold(
+    body: Container(
+      width: double.infinity,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF4f46e5)], begin: Alignment.topCenter, end: Alignment.bottomCenter)
+      ),
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        const Text('🤝', style: TextStyle(fontSize: 100)),
+        const SizedBox(height: 20),
+        const Text('CoPassager', style: TextStyle(fontSize: 42, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: -1)),
+        const Text('Voyagez mieux, ensemble.', style: TextStyle(color: Colors.white70, fontSize: 16)),
+      ]),
     ),
-  ])));
+  );
 }
 
 // --- 2. LOGIQUE PRINCIPALE ---
@@ -69,60 +113,71 @@ class _MainLogicState extends State<MainLogic> {
   final Map<String, List<String>> _history = {}; 
   String? _connectedPeerId;
 
-  // Initialisation avec Groupes Tests variés
   final List<Map<String, dynamic>> _rooms = [
-    {"id": "test_1", "author": "Thomas", "title": "Taxi vers aéroport", "desc": "On partage les frais ?", "type": "DEMANDE", "transport": "avion", "isOnline": true},
-    {"id": "test_2", "author": "Sarah", "title": "Covoit Gare TGV", "desc": "Je pars à 18h", "type": "OFFRE", "transport": "train", "isOnline": true},
-    {"id": "test_3", "author": "Luc", "title": "Partage frais Flixbus", "desc": "Billets de groupe", "type": "OFFRE", "transport": "autocar", "isOnline": true},
-    {"id": "test_4", "author": "Marie", "title": "Traversée portuaire", "desc": "Recherche groupe", "type": "DEMANDE", "transport": "bateau", "isOnline": true},
+    {"id": "test_1", "author": "Thomas", "title": "Taxi vers aéroport", "desc": "On partage les frais ?", "type": "DEMANDE", "transport": "avion", "isOnline": true, "isFake": true},
+    {"id": "test_2", "author": "Sarah", "title": "Covoit Gare TGV", "desc": "Je pars à 18h", "type": "OFFRE", "transport": "train", "isOnline": true, "isFake": true},
+    {"id": "test_3", "author": "Luc", "title": "Partage frais Flixbus", "desc": "Billets de groupe", "type": "OFFRE", "transport": "autocar", "isOnline": true, "isFake": true},
   ];
 
   List<String> _getMessagesFor(String roomId) => _history.putIfAbsent(roomId, () => []);
 
+  Future<void> _showNotification(String title, String body) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'copassager_channel_id', 'Messages CoPassager',
+      importance: Importance.max, priority: Priority.high,
+    );
+    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails());
+    await flutterLocalNotificationsPlugin.show(id: 0, title: title, body: body, notificationDetails: platformDetails);
+  }
+
   void _onPayloadReceived(String id, Payload payload) {
     if (payload.type == PayloadType.BYTES) {
-      setState(() => _getMessagesFor(id).add("Passager: ${String.fromCharCodes(payload.bytes!)}"));
+      String msg = String.fromCharCodes(payload.bytes!);
+      setState(() => _getMessagesFor(id).add("Passager: $msg"));
+      if (_currentStep != 5 || _activeRoom?['id'] != id) {
+        String authorName = _rooms.firstWhere((r) => r['id'] == id, orElse: () => {"author": "Un passager"})['author'];
+        _showNotification("Nouveau message de $authorName ✈️", msg);
+      }
     }
   }
 
   Future<void> _fetchInternetRooms() async {
     setState(() => _isSyncing = true);
-    await Future.delayed(const Duration(milliseconds: 800));
+    try {
+      final data = await Supabase.instance.client.from('rooms').select().order('created_at', ascending: false);
+      setState(() {
+        _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true && r['isFake'] != true);
+        for (var row in data) {
+          _rooms.add({
+            "id": row['id'], "author": row['author'], "title": row['title'],
+            "desc": row['desc'], "type": row['type'], "transport": row['transport'], "isOnline": true, 
+          });
+        }
+      });
+    } catch (e) { dev.log("Erreur Supabase: $e"); }
     setState(() => _isSyncing = false);
   }
 
   void _startNearby() async {
     if (_isServiceRunning) return;
-    
+    await Permission.notification.request();
     if (Platform.isAndroid) {
-      await [
-        Permission.location, Permission.bluetoothScan, Permission.bluetoothAdvertise, 
-        Permission.bluetoothConnect, Permission.nearbyWifiDevices
-      ].request();
+      await [Permission.location, Permission.bluetoothScan, Permission.bluetoothAdvertise, Permission.bluetoothConnect, Permission.nearbyWifiDevices].request();
     }
-
     setState(() => _isServiceRunning = true);
-    
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopDiscovery();
       _fetchInternetRooms();
-
-      // Strategy cross-platform
-      Strategy crossPlatformStrategy = Strategy.P2P_CLUSTER;
-
       await Nearby().startAdvertising(
-        user['name']!, 
-        crossPlatformStrategy,
+        user['name']!, Strategy.P2P_CLUSTER,
         onConnectionInitiated: (id, info) => Nearby().acceptConnection(id, onPayLoadRecieved: _onPayloadReceived),
         onConnectionResult: (id, status) => dev.log("BT : $status"),
         onDisconnected: (id) => setState(() => _rooms.removeWhere((r) => r['id'] == id)),
         serviceId: "com.copassager.app",
       );
-
       await Nearby().startDiscovery(
-        user['name']!, 
-        crossPlatformStrategy,
+        user['name']!, Strategy.P2P_CLUSTER,
         onEndpointFound: (id, name, serviceId) {
           if (!_rooms.any((r) => r['id'] == id)) {
             setState(() => _rooms.add({"id": id, "author": name, "title": "Salon de $name", "desc": "", "type": "OFFRE", "transport": user['transport']}));
@@ -131,36 +186,16 @@ class _MainLogicState extends State<MainLogic> {
         onEndpointLost: (id) => setState(() => _rooms.removeWhere((r) => r['id'] == id)),
         serviceId: "com.copassager.app",
       );
-        
       setState(() => _currentStep = 4);
-    } catch (e) {
-      setState(() => _isServiceRunning = false);
-      dev.log("Erreur Radar iOS/Android", error: e);
-    }
+    } catch (e) { setState(() => _isServiceRunning = false); }
   }
 
   void _connectToPeer(Map<String, dynamic> room) async {
-    if (room['isMine'] == true) {
-      setState(() { _activeRoom = room; _currentStep = 5; });
-      if (_getMessagesFor(room['id']).isEmpty) {
-        _getMessagesFor(room['id']).add("Système: Salon créé. En attente de voyageurs...");
-      }
-      return;
-    }
-
     setState(() { _activeRoom = room; _currentStep = 5; });
-    
-    if (room['isOnline'] == true) {
-      if (_getMessagesFor(room['id']).isEmpty) {
-         _getMessagesFor(room['id']).add("Système: Bienvenue dans le groupe de ${room['author']}");
-      }
-      return;
-    }
-
+    if (room['isMine'] == true || room['isOnline'] == true) return;
     try {
       await Nearby().requestConnection(
-        user['name']!, 
-        room['id'],
+        user['name']!, room['id'],
         onConnectionInitiated: (id, info) => Nearby().acceptConnection(id, onPayLoadRecieved: _onPayloadReceived),
         onConnectionResult: (id, status) { if (status == Status.CONNECTED) _connectedPeerId = id; },
         onDisconnected: (id) => setState(() => _connectedPeerId = null)
@@ -171,55 +206,39 @@ class _MainLogicState extends State<MainLogic> {
   void _openModal() {
     if (_isModalOpen) return;
     setState(() => _isModalOpen = true);
-    
     showModalBottomSheet(
-      context: context, 
-      isScrollControlled: true, 
+      context: context, isScrollControlled: true, 
+      backgroundColor: Colors.transparent,
       builder: (ctx) => _CreateModal(
         activeFilter: _activeFilter,
-        onPublish: (title, desc, type, selectedTransport) {
-          setState(() {
-            _rooms.insert(0, {
-              "id": "my_room_${DateTime.now().millisecondsSinceEpoch}", 
-              "author": user['name'], 
-              "title": title, 
-              "desc": desc,
-              "type": type, 
-              "transport": selectedTransport,
-              "isMine": true
-            });
-            _activeFilter = selectedTransport.toUpperCase();
-          });
+        onPublish: (title, desc, type, transport) async {
           Navigator.pop(ctx);
+          final id = "room_${DateTime.now().millisecondsSinceEpoch}";
+          setState(() {
+            _rooms.insert(0, {"id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "isMine": true, "isOnline": true});
+          });
+          try {
+            await Supabase.instance.client.from('rooms').insert({"id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport});
+          } catch (e) { dev.log("Erreur envoi: $e"); }
         }
       )
     ).then((_) => setState(() => _isModalOpen = false));
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(body: _buildStepView());
-
-  Widget _buildStepView() {
+  Widget build(BuildContext context) {
     switch (_currentStep) {
       case 1: return _WelcomeStep(onNext: () => setState(() => _currentStep = 2));
       case 2: return _ProfileStep(user: user, onNext: () => setState(() => _currentStep = 3));
       case 3: return _TripStep(user: user, onJoin: _startNearby);
       case 4: 
-        List<Map<String, dynamic>> filteredRooms = _rooms.where((r) => _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter).toList();
-        return _DashboardStep(user: user, rooms: filteredRooms, isSync: _isSyncing, activeFilter: _activeFilter, onFilterChanged: (f) => setState(() => _activeFilter = f), onAdd: _openModal, onSelect: _connectToPeer);
-      case 5: {
-        String rid = _activeRoom!['id'];
-        return _ChatStep(room: _activeRoom!, messages: _getMessagesFor(rid), onSend: (v) {
-          setState(() => _getMessagesFor(rid).add("Moi: $v"));
-          if (_connectedPeerId != null) {
-            Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
-          } else if (_activeRoom?['isOnline'] == true) {
-            Future.delayed(const Duration(seconds: 1), () { 
-              if (mounted && _currentStep == 5) setState(() => _getMessagesFor(rid).add("${_activeRoom?['author']}: C'est noté !")); 
-            });
-          }
+        List<Map<String, dynamic>> filtered = _rooms.where((r) => _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter).toList();
+        return _DashboardStep(user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, onFilterChanged: (f) => setState(() => _activeFilter = f), onAdd: _openModal, onSelect: _connectToPeer);
+      case 5: 
+        return _ChatStep(room: _activeRoom!, messages: _getMessagesFor(_activeRoom!['id']), onSend: (v) {
+          setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
+          if (_connectedPeerId != null) Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
         }, onBack: () => setState(() => _currentStep = 4));
-      }
       default: return const SizedBox();
     }
   }
@@ -231,12 +250,20 @@ class _WelcomeStep extends StatelessWidget {
   final VoidCallback onNext;
   const _WelcomeStep({required this.onNext});
   @override
-  Widget build(BuildContext context) => Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-    const Text('🤝', style: TextStyle(fontSize: 80)),
-    ShaderMask(shaderCallback: (bounds) => const LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF3b82f6)]).createShader(bounds), child: const Text('CoPassager', style: TextStyle(fontSize: 42, fontWeight: FontWeight.w900, color: Colors.white))),
-    const SizedBox(height: 40),
-    ElevatedButton(onPressed: onNext, child: const Text("Démarrer l'expérience", style: TextStyle(fontWeight: FontWeight.bold)))
-  ]));
+  Widget build(BuildContext context) => Scaffold(
+    body: Padding(padding: const EdgeInsets.all(40), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      const Text('🤝', style: TextStyle(fontSize: 80)),
+      const SizedBox(height: 20),
+      const Text('Partagez plus qu\'un trajet', textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 10),
+      const Text('Rejoignez des voyageurs autour de vous en temps réel.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+      const SizedBox(height: 50),
+      ElevatedButton(
+        style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 60), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white),
+        onPressed: onNext, child: const Text("COMMENCER", style: TextStyle(fontWeight: FontWeight.bold))
+      )
+    ])),
+  );
 }
 
 class _ProfileStep extends StatelessWidget {
@@ -244,24 +271,31 @@ class _ProfileStep extends StatelessWidget {
   final VoidCallback onNext;
   const _ProfileStep({required this.user, required this.onNext});
   @override
-  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.all(30), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-    const Text('Votre profil', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
-    const SizedBox(height: 20),
-    TextField(decoration: const InputDecoration(hintText: 'Pseudo', border: OutlineInputBorder()), onChanged: (v) => user['name'] = v, onSubmitted: (_) => onNext()),
-    const SizedBox(height: 30),
-    const Text('MODE DE TRANSPORT', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-    const SizedBox(height: 10),
-    Wrap(
-      spacing: 8,
-      children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
-        label: Text(m.toUpperCase()),
-        selected: user['transport'] == m,
-        onSelected: (_) { user['transport'] = m; (context as Element).markNeedsBuild(); },
-      )).toList(),
-    ),
-    const SizedBox(height: 40),
-    ElevatedButton(onPressed: onNext, child: const Text('Suivant')),
-  ]));
+  Widget build(BuildContext context) => Scaffold(
+    body: Padding(padding: const EdgeInsets.all(30), child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('Votre Profil', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: -1)),
+      const SizedBox(height: 10),
+      const Text('Comment souhaitez-vous apparaître ?', style: TextStyle(color: Colors.grey)),
+      const SizedBox(height: 30),
+      TextField(
+        decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
+        onChanged: (v) => user['name'] = v,
+      ),
+      const SizedBox(height: 30),
+      const Text('VOTRE TRANSPORT FAVORI', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6366f1))),
+      const SizedBox(height: 15),
+      Wrap(spacing: 10, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
+        label: Text(m.toUpperCase()), 
+        selected: user['transport'] == m, 
+        onSelected: (_) { user['transport'] = m; (context as Element).markNeedsBuild(); }
+      )).toList()),
+      const SizedBox(height: 50),
+      ElevatedButton(
+        style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 60), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white),
+        onPressed: onNext, child: const Text('CONTINUER')
+      ),
+    ])),
+  );
 }
 
 class _TripStep extends StatelessWidget {
@@ -269,14 +303,16 @@ class _TripStep extends StatelessWidget {
   final VoidCallback onJoin;
   const _TripStep({required this.user, required this.onJoin});
   @override
-  Widget build(BuildContext context) => Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-    const Icon(Icons.wifi_tethering, size: 80, color: Color(0xFF6366f1)),
-    const SizedBox(height: 20),
-    const Text('Bluetooth + Internet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-    const Padding(padding: EdgeInsets.symmetric(horizontal: 40), child: Text('Recherche des voyageurs locaux et en ligne...', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey))),
-    const SizedBox(height: 40),
-    ElevatedButton(onPressed: onJoin, child: const Text('REJOINDRE LE RÉSEAU')),
-  ]));
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      const Icon(Icons.radar, size: 100, color: Color(0xFF6366f1)),
+      const SizedBox(height: 30),
+      const Text('Activation du Radar', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+      const Padding(padding: EdgeInsets.symmetric(horizontal: 50, vertical: 10), child: Text('Nous allons scanner les voyageurs à proximité et en ligne.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey))),
+      const SizedBox(height: 40),
+      ElevatedButton(onPressed: onJoin, child: const Text('REJOINDRE LE RÉSEAU')),
+    ])),
+  );
 }
 
 class _DashboardStep extends StatelessWidget {
@@ -288,67 +324,159 @@ class _DashboardStep extends StatelessWidget {
   final VoidCallback onAdd;
   final Function(Map<String, dynamic>) onSelect;
 
-  const _DashboardStep({required this.user, required this.rooms, required this.isSync, required this.activeFilter, required this.onFilterChanged, required this.onAdd, required this.onSelect});
-  
-  @override
-  Widget build(BuildContext context) => Column(children: [
-    Container(padding: const EdgeInsets.fromLTRB(20, 50, 20, 20), color: const Color(0xFF6366f1), child: Row(children: [
-      const CircleAvatar(backgroundColor: Colors.white, child: Icon(Icons.person)),
-      const SizedBox(width: 15),
-      Expanded(child: Text('Bonjour, ${user['name']}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
-      if (isSync) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
-    ])),
-    SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-      child: Row(
-        children: ['TOUS', 'AVION', 'TRAIN', 'AUTOCAR', 'BATEAU'].map((f) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: ChoiceChip(
-            label: Text(f), selected: activeFilter == f, onSelected: (_) => onFilterChanged(f),
-            // CORRECTION : withValues() remplace withOpacity()
-            selectedColor: const Color(0xFF6366f1).withValues(alpha: 0.2),
-          ),
-        )).toList(),
-      ),
-    ),
-    Expanded(child: ListView.builder(itemCount: rooms.length, itemBuilder: (ctx, i) => Card(margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5), child: ListTile(
-      onTap: () => onSelect(rooms[i]),
-      leading: Icon(rooms[i]['transport'] == 'avion' ? Icons.flight : rooms[i]['transport'] == 'train' ? Icons.train : rooms[i]['transport'] == 'autocar' ? Icons.directions_bus : Icons.directions_boat, color: const Color(0xFF6366f1)),
-      title: Text(rooms[i]['title'], style: const TextStyle(fontWeight: FontWeight.bold)),
-      subtitle: Text('${rooms[i]['author']} • ${rooms[i]['type']}\n${rooms[i]['desc'] ?? ''}', maxLines: 2, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.chat_bubble_outline, color: Colors.grey),
-      isThreeLine: rooms[i]['desc'] != null && rooms[i]['desc'] != '',
-    )))),
-    Padding(padding: const EdgeInsets.all(20), child: FloatingActionButton(onPressed: onAdd, child: const Icon(Icons.add))),
-  ]);
-}
+  // CORRECTION : 'required' bien écrit et suppression du 'super.key' inutile
+  const _DashboardStep({
+    required this.user, 
+    required this.rooms, 
+    required this.isSync, 
+    required this.activeFilter, 
+    required this.onFilterChanged, 
+    required this.onAdd, 
+    required this.onSelect
+  });
 
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8FAFC),
+      body: Column(children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(25, 60, 25, 30),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF8b5cf6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+            borderRadius: BorderRadius.vertical(bottom: Radius.circular(30))
+          ),
+          child: Row(children: [
+            const CircleAvatar(radius: 25, backgroundColor: Colors.white24, child: Icon(Icons.person, color: Colors.white, size: 30)),
+            const SizedBox(width: 15),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Bonjour,', style: TextStyle(color: Colors.white70)),
+              Text(user['name']!, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
+            ])),
+            if (isSync) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
+          ]),
+        ),
+        
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+          child: Row(children: ['TOUS', 'AVION', 'TRAIN', 'AUTOCAR', 'BATEAU'].map((f) => Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: ChoiceChip(
+              label: Text(f), 
+              selected: activeFilter == f, 
+              onSelected: (_) => onFilterChanged(f),
+              selectedColor: const Color(0xFF6366f1),
+              labelStyle: TextStyle(color: activeFilter == f ? Colors.white : const Color(0xFF6366f1), fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              showCheckmark: false,
+            ),
+          )).toList()),
+        ),
+
+        Expanded(child: ListView.builder(
+          padding: const EdgeInsets.only(top: 0),
+          itemCount: rooms.length, 
+          itemBuilder: (ctx, i) {
+            final r = rooms[i];
+            return Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white, 
+                borderRadius: BorderRadius.circular(20), 
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10)] 
+              ),
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(15),
+                onTap: () => onSelect(r),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF6366f1).withValues(alpha: 0.1), 
+                    borderRadius: BorderRadius.circular(15)
+                  ),
+                  child: Icon(r['transport'] == 'avion' ? Icons.flight : Icons.directions_bus, color: const Color(0xFF6366f1)),
+                ),
+                title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const SizedBox(height: 5),
+                  Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade600)),
+                ]),
+                trailing: const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
+              ),
+            );
+          }
+        )),
+      ]),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: onAdd, 
+        backgroundColor: const Color(0xFF6366f1),
+        label: const Text("PUBLIER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        icon: const Icon(Icons.add, color: Colors.white),
+      ),
+    );
+  }
+}
 class _ChatStep extends StatelessWidget {
   final Map<String, dynamic> room;
   final List<String> messages;
   final Function(String) onSend;
   final VoidCallback onBack;
-  const _ChatStep({required this.room, required this.messages, required this.onSend, required this.onBack});
+  const _ChatStep({ required this.room, required this.messages, required this.onSend, required this.onBack});
+
   @override
   Widget build(BuildContext context) {
-    final c = TextEditingController();
+    final textController = TextEditingController();
     return Scaffold(
-      appBar: AppBar(leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: onBack), title: Text(room['title']), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white,),
+      appBar: AppBar(
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios), onPressed: onBack),
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(room['title'], style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          Text(room['author'], style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        ]),
+      ),
       body: Column(children: [
-        Expanded(child: ListView.builder(itemCount: messages.length, itemBuilder: (ctx, i) => ListTile(title: Text(messages[i])))),
-        Padding(padding: const EdgeInsets.all(20), child: TextField(controller: c, decoration: const InputDecoration(hintText: "Message..."), onSubmitted: (v) { onSend(v); c.clear(); })),
-      ])
+        Expanded(child: ListView.builder(
+          padding: const EdgeInsets.all(20),
+          itemCount: messages.length, 
+          itemBuilder: (ctx, i) {
+            bool isMe = messages[i].startsWith("Moi:");
+            return Align(
+              alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 5),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isMe ? const Color(0xFF6366f1) : Colors.grey.shade200,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black)),
+              ),
+            );
+          }
+        )),
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10)]),
+          child: Row(children: [
+            Expanded(child: TextField(controller: textController, decoration: const InputDecoration(hintText: "Écrivez ici...", border: InputBorder.none))),
+            IconButton(icon: const Icon(Icons.send, color: Color(0xFF6366f1)), onPressed: () {
+              if (textController.text.isNotEmpty) {
+                onSend(textController.text);
+                textController.clear();
+              }
+            }),
+          ]),
+        )
+      ]),
     );
   }
 }
 
-// --- MODALE DE CRÉATION DE SALON ---
 class _CreateModal extends StatefulWidget {
   final String activeFilter;
-  final Function(String, String, String, String) onPublish; // Titre, Desc, Type, Transport
+  final Function(String, String, String, String) onPublish; 
   const _CreateModal({required this.activeFilter, required this.onPublish});
-
   @override
   State<_CreateModal> createState() => _CreateModalState();
 }
@@ -367,53 +495,33 @@ class _CreateModalState extends State<_CreateModal> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 20, right: 20, top: 20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text('Nouveau Salon', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 15),
-          
-          Row(
-            children: [
-              Expanded(child: ChoiceChip(label: const Center(child: Text('PROPOSER')), selected: _selectedType == 'OFFRE', onSelected: (v) => setState(() => _selectedType = 'OFFRE'))),
-              const SizedBox(width: 10),
-              Expanded(child: ChoiceChip(label: const Center(child: Text('CHERCHER')), selected: _selectedType == 'DEMANDE', onSelected: (v) => setState(() => _selectedType = 'DEMANDE'))),
-            ],
-          ),
-          const SizedBox(height: 15),
-
-          TextField(controller: _titleController, decoration: const InputDecoration(hintText: 'Titre (ex: Taxi vers Rennes)', border: OutlineInputBorder())),
-          const SizedBox(height: 10),
-          TextField(controller: _descController, maxLines: 2, decoration: const InputDecoration(hintText: 'Détails, horaires...', border: OutlineInputBorder())),
-          const SizedBox(height: 15),
-
-          if (widget.activeFilter == 'TOUS') ...[
-            const Text('Transport :', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-            Wrap(
-              spacing: 8,
-              children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
-                label: Text(m.toUpperCase()), selected: _selectedTransport == m, onSelected: (_) => setState(() => _selectedTransport = m),
-              )).toList(),
-            ),
-          ] else ...[
-             Text('Catégorie : ${widget.activeFilter}', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
-          ],
-
-          const SizedBox(height: 20),
-          ElevatedButton(
-            onPressed: () {
-              if (_titleController.text.isNotEmpty) {
-                widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport);
-              }
-            }, 
-            child: const Text('Publier sur le radar local')
-          ),
-          const SizedBox(height: 20),
-        ],
-      ),
+    return Container(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 25, right: 25, top: 25),
+      decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Créer une annonce', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 20),
+        TextField(controller: _titleController, decoration: InputDecoration(hintText: 'Titre de l\'annonce', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none))),
+        const SizedBox(height: 15),
+        TextField(controller: _descController, maxLines: 2, decoration: InputDecoration(hintText: 'Description (Optionnel)', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none))),
+        const SizedBox(height: 20),
+        Row(children: [
+          Expanded(child: ChoiceChip(label: const Center(child: Text('PROPOSER')), selected: _selectedType == 'OFFRE', onSelected: (v) => setState(() => _selectedType = 'OFFRE'))),
+          const SizedBox(width: 10),
+          Expanded(child: ChoiceChip(label: const Center(child: Text('RECHERCHER')), selected: _selectedType == 'DEMANDE', onSelected: (v) => setState(() => _selectedType = 'DEMANDE'))),
+        ]),
+        const SizedBox(height: 20),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 60), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white),
+          onPressed: () {
+            if (_titleController.text.isNotEmpty) {
+              widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport);
+            }
+          }, 
+          child: const Text('PUBLIER MAINTENANT')
+        ),
+        const SizedBox(height: 30),
+      ]),
     );
   }
 }
