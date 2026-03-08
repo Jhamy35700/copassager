@@ -45,5 +45,5 @@ flutter {
 }
 dependencies {
     // Cette bibliothèque permet de traduire le code Java moderne pour les anciens Android
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
+   coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
