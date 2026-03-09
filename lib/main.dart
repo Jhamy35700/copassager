@@ -194,10 +194,15 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isSyncing = false);
   }
 
-  void _startNearby() async {
+ void _startNearby() async {
     if (_isServiceRunning) return;
-    if (Platform.isAndroid) await [Permission.location, Permission.bluetoothScan, Permission.bluetoothAdvertise, Permission.bluetoothConnect, Permission.nearbyWifiDevices].request();
+    
+    if (Platform.isAndroid) {
+      await [Permission.location, Permission.bluetoothScan, Permission.bluetoothAdvertise, Permission.bluetoothConnect, Permission.nearbyWifiDevices].request();
+    }
+    
     setState(() => _isServiceRunning = true);
+    
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopDiscovery();
@@ -207,7 +212,7 @@ class _MainLogicState extends State<MainLogic> {
         user['name']!, Strategy.P2P_CLUSTER,
         onConnectionInitiated: (id, info) => Nearby().acceptConnection(id, onPayLoadRecieved: _onPayloadReceived),
         onConnectionResult: (id, status) => dev.log("BT : $status"),
-        onDisconnected: (id) => setState(() => _connectedPeerId = null), // Paramètre requis
+        onDisconnected: (id) => setState(() => _connectedPeerId = null),
         serviceId: "com.copassager.app",
       );
       
@@ -219,10 +224,24 @@ class _MainLogicState extends State<MainLogic> {
         onEndpointLost: (id) => setState(() => _rooms.removeWhere((r) => r['id'] == id)),
         serviceId: "com.copassager.app",
       );
+      
+      // On passe au dashboard
       setState(() => _currentStep = 4);
-    } catch (e) { setState(() => _isServiceRunning = false); }
+      
+    } catch (e) { 
+      setState(() {
+        _isServiceRunning = false;
+        _currentStep = 4; // ON LE FORCE À PASSER AU DASHBOARD QUAND MÊME
+      });
+      
+      dev.log("Erreur Nearby: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Bluetooth non disponible, passage en mode Cloud uniquement."), backgroundColor: Colors.orange)
+        );
+      }
+    }
   }
-
   Future<void> _goBackToProfile() async {
     await Nearby().stopAdvertising();
     await Nearby().stopDiscovery();
