@@ -27,7 +27,6 @@ void main() async {
     iOS: initializationSettingsIOS,
   );
   
-  // CORRECTION : Paramètre nommé 'settings' requis ici
   await flutterLocalNotificationsPlugin.initialize(
     settings: initializationSettings,
   );
@@ -63,7 +62,7 @@ class CoPassagerApp extends StatelessWidget {
   }
 }
 
-// --- 1. SPLASH SCREEN (CORRIGÉ ET PROPRE) ---
+// --- 1. SPLASH SCREEN ---
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
   @override
@@ -74,7 +73,6 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    // Délai de 2 secondes avant de passer à la logique principale
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) {
         Navigator.pushReplacement(
@@ -159,7 +157,6 @@ class _MainLogicState extends State<MainLogic> {
 
   List<String> _getMessagesFor(String roomId) => _history.putIfAbsent(roomId, () => []);
 
-  // CORRECTION : Arguments nommés requis pour 'show'
   Future<void> _showNotification(String title, String body) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'cp_channel', 'Messages', importance: Importance.max, priority: Priority.high,
@@ -194,7 +191,7 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isSyncing = false);
   }
 
- void _startNearby() async {
+  void _startNearby() async {
     if (_isServiceRunning) return;
     
     if (Platform.isAndroid) {
@@ -225,44 +222,42 @@ class _MainLogicState extends State<MainLogic> {
         serviceId: "com.copassager.app",
       );
       
-      // On passe au dashboard
       setState(() => _currentStep = 4);
       
     } catch (e) { 
       setState(() {
         _isServiceRunning = false;
-        _currentStep = 4; // ON LE FORCE À PASSER AU DASHBOARD QUAND MÊME
+        _currentStep = 4; // Force l'accès au Dashboard même si BT plante (iOS)
       });
-      
       dev.log("Erreur Nearby: $e");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Bluetooth non disponible, passage en mode Cloud uniquement."), backgroundColor: Colors.orange)
+          const SnackBar(content: Text("Bluetooth non disponible, mode Cloud activé."), backgroundColor: Colors.orange)
         );
       }
     }
   }
+
   Future<void> _goBackToProfile() async {
-    await Nearby().stopAdvertising();
-    await Nearby().stopDiscovery();
+    try {
+      await Nearby().stopAdvertising();
+      await Nearby().stopDiscovery();
+    } catch (e) {
+      dev.log("Erreur arrêt Nearby: $e");
+    }
     setState(() {
       _isServiceRunning = false;
       _currentStep = 2; 
     });
   }
 
-void _connectToPeer(Map<String, dynamic> room) async {
+  void _connectToPeer(Map<String, dynamic> room) async {
     _activeRoom = room;
-    
-    // 👇 NOUVEAU : On lance le chargement des messages Cloud
     _loadHistoryFromCloud(room['id']);
-    
     setState(() { _currentStep = 5; });
     
-    // Si c'est un salon Cloud, on s'arrête là (pas besoin de Bluetooth)
     if (room['isMine'] == true || room['isOnline'] == true) return;
     
-    // Sinon, on tente la connexion Bluetooth Nearby
     try {
       await Nearby().requestConnection(
         user['name']!, room['id'],
@@ -289,7 +284,6 @@ void _connectToPeer(Map<String, dynamic> room) async {
     ).then((_) => setState(() => _isModalOpen = false));
   }
 
-  // Charge l'historique depuis Supabase
   Future<void> _loadHistoryFromCloud(String roomId) async {
     try {
       final data = await Supabase.instance.client
@@ -298,11 +292,8 @@ void _connectToPeer(Map<String, dynamic> room) async {
           .eq('room_id', roomId)
           .order('created_at', ascending: true);
       
-      dev.log("Données reçues pour $roomId: ${data.length} messages");
-      
       setState(() {
         _history[roomId] = data.map<String>((m) {
-          // Si le nom correspond au nôtre, on met "Moi", sinon "Passager"
           String prefix = m['sender_name'] == user['name'] ? "Moi: " : "Passager: ";
           return "$prefix${m['content']}";
         }).toList();
@@ -322,7 +313,11 @@ void _connectToPeer(Map<String, dynamic> room) async {
         List<Map<String, dynamic>> filtered = _rooms.where((r) => _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter).toList();
         return _DashboardStep(
           user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, appVersion: _appVersion,
-          onFilterChanged: (f) => setState(() => _activeFilter = f), onAdd: _openModal, onSelect: _connectToPeer, onEditProfile: _goBackToProfile
+          onFilterChanged: (f) => setState(() => _activeFilter = f), 
+          onAdd: _openModal, 
+          onSelect: _connectToPeer, 
+          onEditProfile: _goBackToProfile,
+          onRefresh: _fetchInternetRooms, 
         );
       case 5: 
         return _ChatStep(
@@ -336,6 +331,7 @@ void _connectToPeer(Map<String, dynamic> room) async {
               await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
             } catch (e) { dev.log("Erreur Cloud Message: $e"); }
           },
+          onRefreshChat: () async => await _loadHistoryFromCloud(_activeRoom!['id']),
         );
       default: return const SizedBox();
     }
@@ -421,8 +417,15 @@ class _DashboardStep extends StatelessWidget {
   final Function(Map<String, dynamic>) onSelect;
   final String appVersion;
   final VoidCallback onEditProfile;
+  final Future<void> Function() onRefresh; 
 
-  const _DashboardStep({required this.user, required this.rooms, required this.isSync, required this.activeFilter, required this.onFilterChanged, required this.onAdd, required this.appVersion, required this.onSelect, required this.onEditProfile});
+  const _DashboardStep({
+    required this.user, required this.rooms, required this.isSync, 
+    required this.activeFilter, required this.onFilterChanged, 
+    required this.onAdd, required this.appVersion, 
+    required this.onSelect, required this.onEditProfile,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -456,29 +459,35 @@ class _DashboardStep extends StatelessWidget {
           ),
         )).toList()),
       ),
-      Expanded(child: ListView.builder(
-        padding: const EdgeInsets.only(top: 0),
-        itemCount: rooms.length, 
-        itemBuilder: (ctx, i) {
-          final r = rooms[i];
-          return Container(
-            margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10)]),
-            child: ListTile(
-              contentPadding: const EdgeInsets.all(20),
-              onTap: () => onSelect(r),
-              leading: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: const Color(0xFF6366f1).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(18)),
-                child: Icon(r['transport'] == 'avion' ? Icons.flight_takeoff : Icons.directions_bus, color: const Color(0xFF6366f1)),
-              ),
-              title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
-              subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
-              trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-            ),
-          );
-        }
-      )),
+      Expanded(
+        child: RefreshIndicator(
+          onRefresh: onRefresh,
+          color: const Color(0xFF6366f1),
+          child: ListView.builder(
+            padding: const EdgeInsets.only(top: 0),
+            itemCount: rooms.length, 
+            itemBuilder: (ctx, i) {
+              final r = rooms[i];
+              return Container(
+                margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10)]),
+                child: ListTile(
+                  contentPadding: const EdgeInsets.all(20),
+                  onTap: () => onSelect(r),
+                  leading: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(color: const Color(0xFF6366f1).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(18)),
+                    child: Icon(r['transport'] == 'avion' ? Icons.flight_takeoff : Icons.directions_bus, color: const Color(0xFF6366f1)),
+                  ),
+                  title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                  subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
+                  trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                ),
+              );
+            }
+          ),
+        )
+      ),
     ]),
     floatingActionButton: FloatingActionButton.extended(
       onPressed: onAdd, backgroundColor: const Color(0xFF6366f1),
@@ -494,7 +503,13 @@ class _ChatStep extends StatelessWidget {
   final List<String> messages;
   final Function(String) onSend;
   final VoidCallback onBack;
-  const _ChatStep({required this.room, required this.messages, required this.onSend, required this.onBack});
+  final Future<void> Function() onRefreshChat; 
+
+  const _ChatStep({
+    required this.room, required this.messages, 
+    required this.onSend, required this.onBack, 
+    required this.onRefreshChat
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -502,26 +517,32 @@ class _ChatStep extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new, size: 20), onPressed: onBack), title: Text(room['title'])),
       body: Column(children: [
-        Expanded(child: ListView.builder(
-          padding: const EdgeInsets.all(25),
-          itemCount: messages.length, 
-          itemBuilder: (ctx, i) {
-            bool isMe = messages[i].startsWith("Moi:");
-            return Align(
-              alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                decoration: BoxDecoration(
-                  color: isMe ? const Color(0xFF6366f1) : Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5)]
-                ),
-                child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
-              ),
-            );
-          }
-        )),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: onRefreshChat,
+            color: const Color(0xFF6366f1),
+            child: ListView.builder(
+              padding: const EdgeInsets.all(25),
+              itemCount: messages.length, 
+              itemBuilder: (ctx, i) {
+                bool isMe = messages[i].startsWith("Moi:");
+                return Align(
+                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isMe ? const Color(0xFF6366f1) : Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5)]
+                    ),
+                    child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
+                  ),
+                );
+              }
+            ),
+          )
+        ),
         Container(
           padding: const EdgeInsets.all(20),
           decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
