@@ -497,8 +497,7 @@ class _TripStep extends StatelessWidget {
     ])),
   );
 }
-
-class _DashboardStep extends StatelessWidget {
+class _DashboardStep extends StatefulWidget {
   final Map<String, String> user;
   final List<Map<String, dynamic>> rooms;
   final bool isSync;
@@ -520,89 +519,124 @@ class _DashboardStep extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: Column(children: [
-      Container(
-        padding: const EdgeInsets.fromLTRB(25, 65, 25, 35),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF8b5cf6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
-          borderRadius: BorderRadius.vertical(bottom: Radius.circular(35))
-        ),
-        child: Row(children: [
-          GestureDetector(onTap: onEditProfile, child: const CircleAvatar(radius: 28, backgroundColor: Colors.white24, child: Icon(Icons.edit, color: Colors.white))),
-          const SizedBox(width: 15),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(appVersion, style: const TextStyle(color: Colors.white70, fontSize: 10)),
-            Text(user['name']!, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-          ])),
-          if (isSync) const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
-        ]),
-      ),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
-        child: Row(children: ['TOUS', 'AVION', 'TRAIN', 'AUTOCAR', 'BATEAU'].map((f) => Padding(
-          padding: const EdgeInsets.only(right: 12),
-          child: ChoiceChip(
-            label: Text(f), selected: activeFilter == f, onSelected: (_) => onFilterChanged(f),
-            selectedColor: const Color(0xFF6366f1),
-            labelStyle: TextStyle(color: activeFilter == f ? Colors.white : const Color(0xFF6366f1), fontWeight: FontWeight.bold),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)), showCheckmark: false,
+  State<_DashboardStep> createState() => _DashboardStepState();
+}
+
+class _DashboardStepState extends State<_DashboardStep> {
+  // NOUVEAU : Un contrôleur pour manipuler le texte de la barre de recherche
+  final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Column(children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(25, 65, 25, 35),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF8b5cf6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+            borderRadius: BorderRadius.vertical(bottom: Radius.circular(35))
           ),
-        )).toList()),
-      ),
-      // Barre de recherche
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20).copyWith(bottom: 15),
-        child: TextField(
-          onChanged: onSearchChanged,
-          decoration: InputDecoration(
-            hintText: 'Rechercher une destination, un mot...',
-            prefixIcon: const Icon(Icons.search, color: Color(0xFF6366f1)),
-            filled: true,
-            fillColor: Colors.grey.shade100,
-            contentPadding: const EdgeInsets.all(15),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+          child: Row(children: [
+            GestureDetector(onTap: widget.onEditProfile, child: const CircleAvatar(radius: 28, backgroundColor: Colors.white24, child: Icon(Icons.edit, color: Colors.white))),
+            const SizedBox(width: 15),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(widget.appVersion, style: const TextStyle(color: Colors.white70, fontSize: 10)),
+              Text(widget.user['name']!, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+            ])),
+            if (widget.isSync) const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
+          ]),
+        ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 25),
+          child: Row(children: ['TOUS', 'AVION', 'TRAIN', 'AUTOCAR', 'BATEAU'].map((f) => Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: ChoiceChip(
+              label: Text(f), selected: widget.activeFilter == f, 
+              onSelected: (_) {
+                widget.onFilterChanged(f);
+                // NOUVEAU : Si on clique sur TOUS, on vide aussi la barre de texte
+                if (f == 'TOUS') {
+                  _searchController.clear();
+                  widget.onSearchChanged('');
+                }
+              },
+              selectedColor: const Color(0xFF6366f1),
+              labelStyle: TextStyle(color: widget.activeFilter == f ? Colors.white : const Color(0xFF6366f1), fontWeight: FontWeight.bold),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)), showCheckmark: false,
+            ),
+          )).toList()),
+        ),
+        // Barre de recherche mise à jour
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20).copyWith(bottom: 15),
+          child: TextField(
+            controller: _searchController, // On attache le contrôleur
+            onChanged: widget.onSearchChanged,
+            decoration: InputDecoration(
+              hintText: 'Rechercher une destination, un mot...',
+              prefixIcon: const Icon(Icons.search, color: Color(0xFF6366f1)),
+              // NOUVEAU : Afficher une croix uniquement s'il y a du texte
+              suffixIcon: _searchController.text.isNotEmpty 
+                ? IconButton(
+                    icon: const Icon(Icons.clear, color: Colors.grey),
+                    onPressed: () {
+                      _searchController.clear(); // Vide le champ visuellement
+                      widget.onSearchChanged(''); // Réinitialise la liste
+                    },
+                  ) 
+                : null,
+              filled: true,
+              fillColor: Colors.grey.shade100,
+              contentPadding: const EdgeInsets.all(15),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+            ),
           ),
         ),
-      ),
-      Expanded(
-        child: RefreshIndicator(
-          onRefresh: onRefresh,
-          color: const Color(0xFF6366f1),
-          child: ListView.builder(
-            padding: const EdgeInsets.only(top: 0),
-            itemCount: rooms.length, 
-            itemBuilder: (ctx, i) {
-              final r = rooms[i];
-              return Container(
-                margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10)]),
-                child: ListTile(
-                  contentPadding: const EdgeInsets.all(20),
-                  onTap: () => onSelect(r),
-                  leading: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: const Color(0xFF6366f1).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(18)),
-                    child: Icon(r['transport'] == 'avion' ? Icons.flight_takeoff : Icons.directions_bus, color: const Color(0xFF6366f1)),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: widget.onRefresh,
+            color: const Color(0xFF6366f1),
+            child: ListView.builder(
+              padding: const EdgeInsets.only(top: 0),
+              itemCount: widget.rooms.length, 
+              itemBuilder: (ctx, i) {
+                final r = widget.rooms[i];
+                return Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(25), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10)]),
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.all(20),
+                    onTap: () => widget.onSelect(r),
+                    leading: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: const Color(0xFF6366f1).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(18)),
+                      child: Icon(r['transport'] == 'avion' ? Icons.flight_takeoff : Icons.directions_bus, color: const Color(0xFF6366f1)),
+                    ),
+                    title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                    subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
+                    trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                   ),
-                  title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
-                  subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
-                  trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-                ),
-              );
-            }
-          ),
-        )
+                );
+              }
+            ),
+          )
+        ),
+      ]),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: widget.onAdd, backgroundColor: const Color(0xFF6366f1),
+        label: const Text("PUBLIER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        icon: const Icon(Icons.add, color: Colors.white),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
-    ]),
-    floatingActionButton: FloatingActionButton.extended(
-      onPressed: onAdd, backgroundColor: const Color(0xFF6366f1),
-      label: const Text("PUBLIER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-      icon: const Icon(Icons.add, color: Colors.white),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-    ),
-  );
+    );
+  }
 }
 
 class _ChatStep extends StatelessWidget {
