@@ -2,7 +2,7 @@ name: copassager
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.0+2
+version: 1.0.0+3
 
 environment:
   sdk: ^3.11.1
@@ -16,6 +16,7 @@ dependencies:
   flutter_local_notifications: ^21.0.0
   supabase_flutter: ^2.12.0
   package_info_plus: ^9.0.0
+  shared_preferences: ^2.5.4
 
 dev_dependencies:
   flutter_test:

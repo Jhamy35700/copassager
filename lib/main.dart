@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'dart:io' show Platform;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // --- INITIALISATION DES SERVICES ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -14,7 +15,6 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterL
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // INITIALISATION SUPABASE
   await Supabase.initialize(
     url: 'https://nfufnqxkgjzhmqbzuhec.supabase.co', 
     anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mdWZucXhrZ2p6aG1xYnp1aGVjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5NTQ0MjYsImV4cCI6MjA4ODUzMDQyNn0.YuFMcYw7vVDY9bADyMV9EhykunZywIfKWHmQ1eOQB3g', 
@@ -129,6 +129,7 @@ class _MainLogicState extends State<MainLogic> {
   bool _isServiceRunning = false;
   bool _isSyncing = false;
   String _activeFilter = 'TOUS';
+  String _searchQuery = ''; // Stocke la recherche textuelle
   String _appVersion = "0.0.0"; 
 
   Map<String, String> user = {"name": "", "transport": "avion", "tripId": ""};
@@ -137,15 +138,13 @@ class _MainLogicState extends State<MainLogic> {
   final Map<String, List<String>> _history = {}; 
   String? _connectedPeerId;
 
-  final List<Map<String, dynamic>> _rooms = [
-    {"id": "test_1", "author": "Thomas", "title": "Taxi vers aéroport", "desc": "On partage les frais ?", "type": "DEMANDE", "transport": "avion", "isOnline": true, "isFake": true},
-    {"id": "test_2", "author": "Sarah", "title": "Covoit Gare TGV", "desc": "Je pars à 18h", "type": "OFFRE", "transport": "train", "isOnline": true, "isFake": true},
-  ];
+  final List<Map<String, dynamic>> _rooms = [];
 
   @override
   void initState() {
     super.initState();
     _loadVersion();
+    _loadSavedProfile(); // Chargement du pseudo au démarrage
   }
 
   Future<void> _loadVersion() async {
@@ -153,6 +152,49 @@ class _MainLogicState extends State<MainLogic> {
       final packageInfo = await PackageInfo.fromPlatform();
       setState(() => _appVersion = "${packageInfo.version}+${packageInfo.buildNumber}");
     } catch (e) { dev.log("Erreur version: $e"); }
+  }
+
+  // --- NOUVELLES FONCTIONS DE PROFIL ---
+  Future<void> _loadSavedProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      user['name'] = prefs.getString('saved_pseudo') ?? "";
+      user['transport'] = prefs.getString('saved_transport') ?? "avion";
+    });
+  }
+
+  Future<bool> _saveAndValidateProfile(String newPseudo, String transport) async {
+    final prefs = await SharedPreferences.getInstance();
+    final oldPseudo = prefs.getString('saved_pseudo') ?? "";
+
+    if (newPseudo != oldPseudo) {
+      try {
+        final data = await Supabase.instance.client
+            .from('users')
+            .select('pseudo')
+            .eq('pseudo', newPseudo)
+            .maybeSingle();
+
+        if (data != null) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo est déjà pris !"), backgroundColor: Colors.red));
+          return false; // Pseudo refusé car existant
+        }
+
+        await Supabase.instance.client.from('users').insert({'pseudo': newPseudo});
+      } catch (e) {
+        dev.log("Erreur validation Supabase: $e");
+      }
+    }
+
+    await prefs.setString('saved_pseudo', newPseudo);
+    await prefs.setString('saved_transport', transport);
+
+    setState(() {
+      user['name'] = newPseudo;
+      user['transport'] = transport;
+      _currentStep = 3;
+    });
+    return true; 
   }
 
   List<String> _getMessagesFor(String roomId) => _history.putIfAbsent(roomId, () => []);
@@ -182,7 +224,7 @@ class _MainLogicState extends State<MainLogic> {
     try {
       final data = await Supabase.instance.client.from('rooms').select().order('created_at', ascending: false);
       setState(() {
-        _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true && r['isFake'] != true);
+        _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true);
         for (var row in data) {
           _rooms.add({"id": row['id'], "author": row['author'], "title": row['title'], "desc": row['desc'], "type": row['type'], "transport": row['transport'], "isOnline": true});
         }
@@ -194,6 +236,14 @@ class _MainLogicState extends State<MainLogic> {
   void _startNearby() async {
     if (_isServiceRunning) return;
     
+    // BYPASS IOS
+    if (Platform.isIOS) {
+      dev.log("iPhone détecté : Passage direct au Cloud Supabase");
+      _fetchInternetRooms();
+      setState(() => _currentStep = 4);
+      return;
+    }
+
     if (Platform.isAndroid) {
       await [Permission.location, Permission.bluetoothScan, Permission.bluetoothAdvertise, Permission.bluetoothConnect, Permission.nearbyWifiDevices].request();
     }
@@ -227,14 +277,10 @@ class _MainLogicState extends State<MainLogic> {
     } catch (e) { 
       setState(() {
         _isServiceRunning = false;
-        _currentStep = 4; // Force l'accès au Dashboard même si BT plante (iOS)
+        _currentStep = 4;
       });
       dev.log("Erreur Nearby: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Bluetooth non disponible, mode Cloud activé."), backgroundColor: Colors.orange)
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Bluetooth non disponible, mode Cloud activé."), backgroundColor: Colors.orange));
     }
   }
 
@@ -307,13 +353,23 @@ class _MainLogicState extends State<MainLogic> {
   Widget build(BuildContext context) {
     switch (_currentStep) {
       case 1: return _WelcomeStep(onNext: () => setState(() => _currentStep = 2));
-      case 2: return _ProfileStep(user: user, onNext: () => setState(() => _currentStep = 3));
-      case 3: return _TripStep(user: user, onJoin: _startNearby);
+      case 2: return _ProfileStep(user: user, onSave: _saveAndValidateProfile);
+      case 3: return _TripStep(onJoin: _startNearby);
       case 4: 
-        List<Map<String, dynamic>> filtered = _rooms.where((r) => _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter).toList();
+        // Filtrage croisé : Transport + Recherche texte
+        List<Map<String, dynamic>> filtered = _rooms.where((r) {
+          bool matchFilter = _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter;
+          bool matchSearch = _searchQuery.isEmpty || 
+                             r['title'].toString().toLowerCase().contains(_searchQuery.toLowerCase()) || 
+                             r['desc'].toString().toLowerCase().contains(_searchQuery.toLowerCase()) ||
+                             r['author'].toString().toLowerCase().contains(_searchQuery.toLowerCase());
+          return matchFilter && matchSearch;
+        }).toList();
+        
         return _DashboardStep(
           user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, appVersion: _appVersion,
           onFilterChanged: (f) => setState(() => _activeFilter = f), 
+          onSearchChanged: (s) => setState(() => _searchQuery = s),
           onAdd: _openModal, 
           onSelect: _connectToPeer, 
           onEditProfile: _goBackToProfile,
@@ -360,38 +416,73 @@ class _WelcomeStep extends StatelessWidget {
   );
 }
 
-class _ProfileStep extends StatelessWidget {
+// Stateful pour gérer la sauvegarde et le bouton de chargement
+class _ProfileStep extends StatefulWidget {
   final Map<String, String> user;
-  final VoidCallback onNext;
-  const _ProfileStep({required this.user, required this.onNext});
+  final Future<bool> Function(String, String) onSave;
+
+  const _ProfileStep({required this.user, required this.onSave});
+
+  @override
+  State<_ProfileStep> createState() => _ProfileStepState();
+}
+
+class _ProfileStepState extends State<_ProfileStep> {
+  late TextEditingController _nameCtrl;
+  late String _currentTransport;
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController(text: widget.user['name']);
+    _currentTransport = widget.user['transport'] ?? 'avion';
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submitProfile() async {
+    final pseudo = _nameCtrl.text.trim();
+    if (pseudo.isEmpty) return;
+    
+    setState(() => _isLoading = true);
+    bool success = await widget.onSave(pseudo, _currentTransport);
+    if (mounted && !success) setState(() => _isLoading = false);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     body: Padding(padding: const EdgeInsets.all(35), child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('Votre Profil', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
       const SizedBox(height: 30),
-      TextFormField(
-        initialValue: user['name'],
+      TextField(
+        controller: _nameCtrl,
         decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
-        onChanged: (v) => user['name'] = v,
       ),
       const SizedBox(height: 30),
       Wrap(spacing: 12, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
-        label: Text(m.toUpperCase()), selected: user['transport'] == m, 
-        onSelected: (_) { user['transport'] = m; (context as Element).markNeedsBuild(); }
+        label: Text(m.toUpperCase()), selected: _currentTransport == m, 
+        onSelected: (_) => setState(() => _currentTransport = m),
       )).toList()),
       const SizedBox(height: 50),
       ElevatedButton(
         style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
-        onPressed: onNext, child: const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold))
+        onPressed: _isLoading ? null : _submitProfile,
+        child: _isLoading 
+            ? const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
+            : const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold)),
       ),
     ])),
   );
 }
 
 class _TripStep extends StatelessWidget {
-  final Map<String, String> user;
   final VoidCallback onJoin;
-  const _TripStep({required this.user, required this.onJoin});
+  const _TripStep({required this.onJoin});
   @override
   Widget build(BuildContext context) => Scaffold(
     body: Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -413,6 +504,7 @@ class _DashboardStep extends StatelessWidget {
   final bool isSync;
   final String activeFilter;
   final Function(String) onFilterChanged;
+  final Function(String) onSearchChanged;
   final VoidCallback onAdd;
   final Function(Map<String, dynamic>) onSelect;
   final String appVersion;
@@ -422,9 +514,9 @@ class _DashboardStep extends StatelessWidget {
   const _DashboardStep({
     required this.user, required this.rooms, required this.isSync, 
     required this.activeFilter, required this.onFilterChanged, 
-    required this.onAdd, required this.appVersion, 
-    required this.onSelect, required this.onEditProfile,
-    required this.onRefresh,
+    required this.onSearchChanged, required this.onAdd, 
+    required this.appVersion, required this.onSelect, 
+    required this.onEditProfile, required this.onRefresh,
   });
 
   @override
@@ -458,6 +550,21 @@ class _DashboardStep extends StatelessWidget {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)), showCheckmark: false,
           ),
         )).toList()),
+      ),
+      // Barre de recherche
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20).copyWith(bottom: 15),
+        child: TextField(
+          onChanged: onSearchChanged,
+          decoration: InputDecoration(
+            hintText: 'Rechercher une destination, un mot...',
+            prefixIcon: const Icon(Icons.search, color: Color(0xFF6366f1)),
+            filled: true,
+            fillColor: Colors.grey.shade100,
+            contentPadding: const EdgeInsets.all(15),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+          ),
+        ),
       ),
       Expanded(
         child: RefreshIndicator(
