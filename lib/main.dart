@@ -179,6 +179,7 @@ class _MainLogicState extends State<MainLogic> {
           .maybeSingle();
 
       if (data != null) {
+        dev.log("Comparaison -> BDD : '${data['password']}' | Tapé : '$pwd'");
         // LE COMPTE EXISTE : On vérifie le mot de passe
         // (On autorise aussi si le mot de passe BDD est vide, pour migrer tes vieux tests)
         if (data['password'] != null && data['password'] != pwd) {
