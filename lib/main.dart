@@ -132,7 +132,8 @@ class _MainLogicState extends State<MainLogic> {
   String _searchQuery = ''; 
   String _appVersion = "0.0.0"; 
 
-  Map<String, String> user = {"name": "", "transport": "avion", "tripId": ""};
+  // Mise à jour de l'objet utilisateur avec les nouveaux champs
+  Map<String, String> user = {"name": "", "transport": "avion", "firstName": "", "lastName": "", "address": ""};
   Map<String, dynamic>? _activeRoom;
   
   final Map<String, List<String>> _history = {}; 
@@ -154,15 +155,20 @@ class _MainLogicState extends State<MainLogic> {
     } catch (e) { dev.log("Erreur version: $e"); }
   }
 
+  // Chargement des nouveaux champs depuis la mémoire
   Future<void> _loadSavedProfile() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       user['name'] = prefs.getString('saved_pseudo') ?? "";
       user['transport'] = prefs.getString('saved_transport') ?? "avion";
+      user['firstName'] = prefs.getString('saved_firstname') ?? "";
+      user['lastName'] = prefs.getString('saved_lastname') ?? "";
+      user['address'] = prefs.getString('saved_address') ?? "";
     });
   }
 
-  Future<bool> _saveAndValidateProfile(String newPseudo, String transport) async {
+  // Sauvegarde globale (Mise à jour pour gérer Nom, Prénom, Adresse et l'Upsert)
+  Future<bool> _saveAndValidateProfile(String newPseudo, String transport, String fName, String lName, String addr) async {
     final prefs = await SharedPreferences.getInstance();
     final oldPseudo = prefs.getString('saved_pseudo') ?? "";
 
@@ -178,19 +184,35 @@ class _MainLogicState extends State<MainLogic> {
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo est déjà pris !"), backgroundColor: Colors.red));
           return false; 
         }
-
-        await Supabase.instance.client.from('users').insert({'pseudo': newPseudo});
       } catch (e) {
         dev.log("Erreur validation Supabase: $e");
       }
     }
 
+    try {
+      // Upsert : Insère ou met à jour si le pseudo existe déjà
+      await Supabase.instance.client.from('users').upsert({
+        'pseudo': newPseudo,
+        'prenom': fName,
+        'nom': lName,
+        'adresse': addr
+      });
+    } catch (e) {
+      dev.log("Erreur Upsert Supabase: $e");
+    }
+
     await prefs.setString('saved_pseudo', newPseudo);
     await prefs.setString('saved_transport', transport);
+    await prefs.setString('saved_firstname', fName);
+    await prefs.setString('saved_lastname', lName);
+    await prefs.setString('saved_address', addr);
 
     setState(() {
       user['name'] = newPseudo;
       user['transport'] = transport;
+      user['firstName'] = fName;
+      user['lastName'] = lName;
+      user['address'] = addr;
       _activeFilter = transport.toUpperCase();
       _currentStep = 3;
     });
@@ -226,21 +248,27 @@ class _MainLogicState extends State<MainLogic> {
       setState(() {
         _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true);
         for (var row in data) {
-          _rooms.add({"id": row['id'], "author": row['author'], "title": row['title'], "desc": row['desc'], "type": row['type'], "transport": row['transport'], "isOnline": true});
+          _rooms.add({
+            "id": row['id'], 
+            "author": row['author'], 
+            "title": row['title'], 
+            "desc": row['desc'], 
+            "type": row['type'], 
+            "transport": row['transport'], 
+            "trip_number": row['trip_number'], // Ajout de la récupération du N°
+            "isOnline": true
+          });
         }
       });
     } catch (e) { dev.log("Erreur Supabase: $e"); }
     setState(() => _isSyncing = false);
   }
 
-  // --- NOUVEAU : FONCTION DE SUPPRESSION ---
   Future<void> _deleteRoom(String roomId) async {
-    // 1. On l'enlève de l'écran immédiatement pour que ce soit fluide
     setState(() {
       _rooms.removeWhere((r) => r['id'] == roomId);
     });
 
-    // 2. On dit à Supabase de la détruire dans le Cloud
     try {
       await Supabase.instance.client.from('rooms').delete().eq('id', roomId);
       if (mounted) {
@@ -338,12 +366,16 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isModalOpen = true);
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: Colors.transparent,
-      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport) async {
+      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber) async { // Paramètre ajouté
           Navigator.pop(ctx);
           final id = "room_${DateTime.now().millisecondsSinceEpoch}";
-          setState(() => _rooms.insert(0, {"id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "isMine": true, "isOnline": true}));
+          setState(() => _rooms.insert(0, {
+            "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber, "isMine": true, "isOnline": true
+          }));
           try {
-            await Supabase.instance.client.from('rooms').insert({"id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport});
+            await Supabase.instance.client.from('rooms').insert({
+              "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber
+            });
           } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur Cloud: $e"), backgroundColor: Colors.red)); }
       })
     ).then((_) => setState(() => _isModalOpen = false));
@@ -381,7 +413,8 @@ class _MainLogicState extends State<MainLogic> {
           bool matchSearch = _searchQuery.isEmpty || 
                              r['title'].toString().toLowerCase().contains(_searchQuery.toLowerCase()) || 
                              r['desc'].toString().toLowerCase().contains(_searchQuery.toLowerCase()) ||
-                             r['author'].toString().toLowerCase().contains(_searchQuery.toLowerCase());
+                             r['author'].toString().toLowerCase().contains(_searchQuery.toLowerCase()) ||
+                             (r['trip_number'] != null && r['trip_number'].toString().toLowerCase().contains(_searchQuery.toLowerCase()));
           return matchFilter && matchSearch;
         }).toList();
         
@@ -393,7 +426,7 @@ class _MainLogicState extends State<MainLogic> {
           onSelect: _connectToPeer, 
           onEditProfile: _goBackToProfile,
           onRefresh: _fetchInternetRooms, 
-          onDelete: _deleteRoom, // ON PASSE LA NOUVELLE FONCTION AU TABLEAU DE BORD
+          onDelete: _deleteRoom,
         );
         break;
       case 5: 
@@ -453,7 +486,7 @@ class _WelcomeStep extends StatelessWidget {
 
 class _ProfileStep extends StatefulWidget {
   final Map<String, String> user;
-  final Future<bool> Function(String, String) onSave;
+  final Future<bool> Function(String, String, String, String, String) onSave;
 
   const _ProfileStep({required this.user, required this.onSave});
 
@@ -463,6 +496,9 @@ class _ProfileStep extends StatefulWidget {
 
 class _ProfileStepState extends State<_ProfileStep> {
   late TextEditingController _nameCtrl;
+  late TextEditingController _fNameCtrl;
+  late TextEditingController _lNameCtrl;
+  late TextEditingController _addrCtrl;
   late String _currentTransport;
   bool _isLoading = false;
 
@@ -470,12 +506,18 @@ class _ProfileStepState extends State<_ProfileStep> {
   void initState() {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.user['name']);
+    _fNameCtrl = TextEditingController(text: widget.user['firstName']);
+    _lNameCtrl = TextEditingController(text: widget.user['lastName']);
+    _addrCtrl = TextEditingController(text: widget.user['address']);
     _currentTransport = widget.user['transport'] ?? 'avion';
   }
 
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _fNameCtrl.dispose();
+    _lNameCtrl.dispose();
+    _addrCtrl.dispose();
     super.dispose();
   }
 
@@ -484,33 +526,52 @@ class _ProfileStepState extends State<_ProfileStep> {
     if (pseudo.isEmpty) return;
     
     setState(() => _isLoading = true);
-    bool success = await widget.onSave(pseudo, _currentTransport);
+    bool success = await widget.onSave(pseudo, _currentTransport, _fNameCtrl.text.trim(), _lNameCtrl.text.trim(), _addrCtrl.text.trim());
     if (mounted && !success) setState(() => _isLoading = false);
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: Padding(padding: const EdgeInsets.all(35), child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('Votre Profil', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
-      const SizedBox(height: 30),
-      TextField(
-        controller: _nameCtrl,
-        decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
-      ),
-      const SizedBox(height: 30),
-      Wrap(spacing: 12, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
-        label: Text(m.toUpperCase()), selected: _currentTransport == m, 
-        onSelected: (_) => setState(() => _currentTransport = m),
-      )).toList()),
-      const SizedBox(height: 50),
-      ElevatedButton(
-        style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
-        onPressed: _isLoading ? null : _submitProfile,
-        child: _isLoading 
-            ? const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
-            : const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold)),
-      ),
-    ])),
+    body: SingleChildScrollView(
+      padding: const EdgeInsets.all(35), 
+      child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const SizedBox(height: 40),
+        const Text('Votre Profil', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 30),
+        TextField(
+          controller: _nameCtrl,
+          decoration: InputDecoration(hintText: 'Pseudo (Obligatoire)', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+        ),
+        const SizedBox(height: 15),
+        Row(
+          children: [
+            Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom (Optionnel)', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
+            const SizedBox(width: 15),
+            Expanded(child: TextField(controller: _lNameCtrl, decoration: InputDecoration(hintText: 'Nom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
+          ],
+        ),
+        const SizedBox(height: 15),
+        TextField(
+          controller: _addrCtrl,
+          decoration: InputDecoration(hintText: 'Ville / Adresse (Optionnel)', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+        ),
+        const SizedBox(height: 30),
+        const Text('Transport par défaut :', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 10),
+        Wrap(spacing: 12, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
+          label: Text(m.toUpperCase()), selected: _currentTransport == m, 
+          onSelected: (_) => setState(() => _currentTransport = m),
+        )).toList()),
+        const SizedBox(height: 50),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+          onPressed: _isLoading ? null : _submitProfile,
+          child: _isLoading 
+              ? const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
+              : const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ]),
+    ),
   );
 }
 
@@ -544,7 +605,7 @@ class _DashboardStep extends StatefulWidget {
   final String appVersion;
   final VoidCallback onEditProfile;
   final Future<void> Function() onRefresh; 
-  final Function(String) onDelete; // NOUVELLE FONCTION REQUISE
+  final Function(String) onDelete;
 
   const _DashboardStep({
     required this.user, required this.rooms, required this.isSync, 
@@ -651,10 +712,20 @@ class _DashboardStepState extends State<_DashboardStep> {
                       decoration: BoxDecoration(color: const Color(0xFF6366f1).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(18)),
                       child: Icon(r['transport'] == 'avion' ? Icons.flight_takeoff : Icons.directions_bus, color: const Color(0xFF6366f1)),
                     ),
-                    title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                    title: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(child: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17), overflow: TextOverflow.ellipsis)),
+                        // Affichage du Numéro de vol/train s'il existe
+                        if (r['trip_number'] != null && r['trip_number'].toString().isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(10)),
+                            child: Text(r['trip_number'], style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black54)),
+                          )
+                      ],
+                    ),
                     subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
-                    
-                    // --- NOUVEAU : ICONE POUBELLE OU CHEVRON ---
                     trailing: r['author'] == widget.user['name'] 
                       ? IconButton(
                           icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -761,7 +832,7 @@ class _ChatStep extends StatelessWidget {
 
 class _CreateModal extends StatefulWidget {
   final String activeFilter;
-  final Function(String, String, String, String) onPublish; 
+  final Function(String, String, String, String, String) onPublish; // Ajout paramètre N°
   const _CreateModal({required this.activeFilter, required this.onPublish});
   @override
   State<_CreateModal> createState() => _CreateModalState();
@@ -772,11 +843,23 @@ class _CreateModalState extends State<_CreateModal> {
   String _selectedType = 'OFFRE';
   final _titleController = TextEditingController();
   final _descController = TextEditingController();
+  final _tripNumberController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _selectedTransport = widget.activeFilter == 'TOUS' ? 'avion' : widget.activeFilter.toLowerCase();
+  }
+
+  // Fonction pour changer le texte du champ selon le transport
+  String getHintForTransport() {
+    switch (_selectedTransport) {
+      case 'avion': return 'N° de Vol (Ex: AF123)';
+      case 'train': return 'N° de Train (Ex: TGV 8765)';
+      case 'autocar': return 'N° ou Compagnie (Ex: FlixBus)';
+      case 'bateau': return 'Nom du Navire ou Ligne';
+      default: return 'N° de transport';
+    }
   }
 
   @override
@@ -786,18 +869,41 @@ class _CreateModalState extends State<_CreateModal> {
     child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('Créer une annonce', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
       const SizedBox(height: 25),
-      TextField(controller: _titleController, decoration: InputDecoration(hintText: 'Titre', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
-      const SizedBox(height: 25),
+      
+      // Sélecteur dynamique de transport dans la modale
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(children: ['avion', 'train', 'autocar', 'bateau'].map((m) => Padding(
+          padding: const EdgeInsets.only(right: 10),
+          child: ChoiceChip(
+            label: Text(m.toUpperCase(), style: const TextStyle(fontSize: 12)), 
+            selected: _selectedTransport == m, 
+            onSelected: (_) => setState(() => _selectedTransport = m)
+          ),
+        )).toList()),
+      ),
+      const SizedBox(height: 15),
+
+      // Le champ intelligent
+      TextField(controller: _tripNumberController, decoration: InputDecoration(hintText: getHintForTransport(), filled: true, fillColor: Colors.blue.shade50, prefixIcon: const Icon(Icons.confirmation_number_outlined), border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
+      const SizedBox(height: 15),
+
+      TextField(controller: _titleController, decoration: InputDecoration(hintText: 'Titre de l\'annonce', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
+      const SizedBox(height: 15),
+      
       Row(children: [
         Expanded(child: ChoiceChip(label: const Center(child: Text('OFFRE')), selected: _selectedType == 'OFFRE', onSelected: (_) => setState(() => _selectedType = 'OFFRE'))),
         const SizedBox(width: 15),
         Expanded(child: ChoiceChip(label: const Center(child: Text('DEMANDE')), selected: _selectedType == 'DEMANDE', onSelected: (_) => setState(() => _selectedType = 'DEMANDE'))),
       ]),
       const SizedBox(height: 35),
+      
       ElevatedButton(
         style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
         onPressed: () {
-          if (_titleController.text.isNotEmpty) widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport);
+          if (_titleController.text.isNotEmpty) {
+            widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport, _tripNumberController.text.trim());
+          }
         }, 
         child: const Text('PUBLIER', style: TextStyle(fontWeight: FontWeight.bold))
       ),
