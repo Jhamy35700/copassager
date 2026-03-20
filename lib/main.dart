@@ -132,7 +132,6 @@ class _MainLogicState extends State<MainLogic> {
   String _searchQuery = ''; 
   String _appVersion = "0.0.0"; 
 
-  // Mise à jour de l'objet utilisateur avec les nouveaux champs
   Map<String, String> user = {"name": "", "transport": "avion", "firstName": "", "lastName": "", "address": ""};
   Map<String, dynamic>? _activeRoom;
   
@@ -155,7 +154,6 @@ class _MainLogicState extends State<MainLogic> {
     } catch (e) { dev.log("Erreur version: $e"); }
   }
 
-  // Chargement des nouveaux champs depuis la mémoire
   Future<void> _loadSavedProfile() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -167,7 +165,6 @@ class _MainLogicState extends State<MainLogic> {
     });
   }
 
-  // Sauvegarde globale (Mise à jour pour gérer Nom, Prénom, Adresse et l'Upsert)
   Future<bool> _saveAndValidateProfile(String newPseudo, String transport, String fName, String lName, String addr) async {
     final prefs = await SharedPreferences.getInstance();
     final oldPseudo = prefs.getString('saved_pseudo') ?? "";
@@ -190,7 +187,6 @@ class _MainLogicState extends State<MainLogic> {
     }
 
     try {
-      // Upsert : Insère ou met à jour si le pseudo existe déjà
       await Supabase.instance.client.from('users').upsert({
         'pseudo': newPseudo,
         'prenom': fName,
@@ -255,7 +251,7 @@ class _MainLogicState extends State<MainLogic> {
             "desc": row['desc'], 
             "type": row['type'], 
             "transport": row['transport'], 
-            "trip_number": row['trip_number'], // Ajout de la récupération du N°
+            "trip_number": row['trip_number'],
             "isOnline": true
           });
         }
@@ -366,7 +362,7 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isModalOpen = true);
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: Colors.transparent,
-      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber) async { // Paramètre ajouté
+      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber) async { 
           Navigator.pop(ctx);
           final id = "room_${DateTime.now().millisecondsSinceEpoch}";
           setState(() => _rooms.insert(0, {
@@ -716,7 +712,6 @@ class _DashboardStepState extends State<_DashboardStep> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Expanded(child: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17), overflow: TextOverflow.ellipsis)),
-                        // Affichage du Numéro de vol/train s'il existe
                         if (r['trip_number'] != null && r['trip_number'].toString().isNotEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -757,9 +752,10 @@ class _DashboardStepState extends State<_DashboardStep> {
           )
         ),
       ]),
+      // 👇 LE BOUTON FLOTTANT MIS À JOUR ICI 👇
       floatingActionButton: FloatingActionButton.extended(
         onPressed: widget.onAdd, backgroundColor: const Color(0xFF6366f1),
-        label: const Text("PUBLIER", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        label: const Text("CRÉER UN SALON", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         icon: const Icon(Icons.add, color: Colors.white),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
@@ -832,7 +828,7 @@ class _ChatStep extends StatelessWidget {
 
 class _CreateModal extends StatefulWidget {
   final String activeFilter;
-  final Function(String, String, String, String, String) onPublish; // Ajout paramètre N°
+  final Function(String, String, String, String, String) onPublish; 
   const _CreateModal({required this.activeFilter, required this.onPublish});
   @override
   State<_CreateModal> createState() => _CreateModalState();
@@ -851,7 +847,6 @@ class _CreateModalState extends State<_CreateModal> {
     _selectedTransport = widget.activeFilter == 'TOUS' ? 'avion' : widget.activeFilter.toLowerCase();
   }
 
-  // Fonction pour changer le texte du champ selon le transport
   String getHintForTransport() {
     switch (_selectedTransport) {
       case 'avion': return 'N° de Vol (Ex: AF123)';
@@ -867,10 +862,9 @@ class _CreateModalState extends State<_CreateModal> {
     padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom + 30, left: 30, right: 30, top: 30),
     decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(35))),
     child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('Créer une annonce', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+      const Text('Créer un Salon', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
       const SizedBox(height: 25),
       
-      // Sélecteur dynamique de transport dans la modale
       SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(children: ['avion', 'train', 'autocar', 'bateau'].map((m) => Padding(
@@ -884,13 +878,25 @@ class _CreateModalState extends State<_CreateModal> {
       ),
       const SizedBox(height: 15),
 
-      // Le champ intelligent
       TextField(controller: _tripNumberController, decoration: InputDecoration(hintText: getHintForTransport(), filled: true, fillColor: Colors.blue.shade50, prefixIcon: const Icon(Icons.confirmation_number_outlined), border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
       const SizedBox(height: 15),
 
       TextField(controller: _titleController, decoration: InputDecoration(hintText: 'Titre de l\'annonce', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
       const SizedBox(height: 15),
       
+      // 👇 LE CHAMP DESCRIPTION AJOUTÉ ICI 👇
+      TextField(
+        controller: _descController, 
+        maxLines: 2, 
+        decoration: InputDecoration(
+          hintText: 'Description (Ex: Je cherche quelqu\'un pour partager les frais...)', 
+          filled: true, 
+          fillColor: Colors.grey.shade50, 
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)
+        )
+      ),
+      const SizedBox(height: 15),
+
       Row(children: [
         Expanded(child: ChoiceChip(label: const Center(child: Text('OFFRE')), selected: _selectedType == 'OFFRE', onSelected: (_) => setState(() => _selectedType = 'OFFRE'))),
         const SizedBox(width: 15),
@@ -898,6 +904,7 @@ class _CreateModalState extends State<_CreateModal> {
       ]),
       const SizedBox(height: 35),
       
+      // 👇 LE BOUTON DE VALIDATION MIS À JOUR ICI 👇
       ElevatedButton(
         style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
         onPressed: () {
@@ -905,7 +912,7 @@ class _CreateModalState extends State<_CreateModal> {
             widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport, _tripNumberController.text.trim());
           }
         }, 
-        child: const Text('PUBLIER', style: TextStyle(fontWeight: FontWeight.bold))
+        child: const Text('CRÉER LE SALON', style: TextStyle(fontWeight: FontWeight.bold))
       ),
     ]),
   );
