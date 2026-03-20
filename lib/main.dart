@@ -141,6 +141,7 @@ class _MainLogicState extends State<MainLogic> {
   String? _connectedPeerId;
 
   final List<Map<String, dynamic>> _rooms = [];
+  StreamSubscription<List<Map<String, dynamic>>>? _roomsSubscription;
   
 // On remplace le simple écouteur par un "Dictionnaire d'écouteurs" 
   // pour pouvoir écouter plusieurs salons rejoints en même temps en arrière-plan.
