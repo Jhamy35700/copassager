@@ -132,7 +132,7 @@ class _MainLogicState extends State<MainLogic> {
   String _searchQuery = ''; 
   String _appVersion = "0.0.0"; 
 
-  Map<String, String> user = {"name": "", "transport": "avion", "firstName": "", "lastName": "", "address": ""};
+  Map<String, String> user = {"name": "", "password": "", "transport": "avion", "firstName": "", "lastName": "", "address": ""};
   Map<String, dynamic>? _activeRoom;
   
   final Map<String, List<String>> _history = {}; 
@@ -158,6 +158,7 @@ class _MainLogicState extends State<MainLogic> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       user['name'] = prefs.getString('saved_pseudo') ?? "";
+      user['password'] = prefs.getString('saved_password') ?? ""; // NOUVEAU
       user['transport'] = prefs.getString('saved_transport') ?? "avion";
       user['firstName'] = prefs.getString('saved_firstname') ?? "";
       user['lastName'] = prefs.getString('saved_lastname') ?? "";
@@ -165,39 +166,45 @@ class _MainLogicState extends State<MainLogic> {
     });
   }
 
-  Future<bool> _saveAndValidateProfile(String newPseudo, String transport, String fName, String lName, String addr) async {
+  // LOGIQUE DE CONNEXION / INSCRIPTION UNIFIÉE
+  Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
     final prefs = await SharedPreferences.getInstance();
-    final oldPseudo = prefs.getString('saved_pseudo') ?? "";
-
-    if (newPseudo != oldPseudo) {
-      try {
-        final data = await Supabase.instance.client
-            .from('users')
-            .select('pseudo')
-            .eq('pseudo', newPseudo)
-            .maybeSingle();
-
-        if (data != null) {
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo est déjà pris !"), backgroundColor: Colors.red));
-          return false; 
-        }
-      } catch (e) {
-        dev.log("Erreur validation Supabase: $e");
-      }
-    }
 
     try {
+      // 1. On cherche si le pseudo existe déjà dans Supabase
+      final data = await Supabase.instance.client
+          .from('users')
+          .select() // On récupère tout
+          .eq('pseudo', newPseudo)
+          .maybeSingle();
+
+      if (data != null) {
+        // LE COMPTE EXISTE : On vérifie le mot de passe
+        // (On autorise aussi si le mot de passe BDD est vide, pour migrer tes vieux tests)
+        if (data['password'] != null && data['password'] != pwd) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo existe déjà. Mot de passe incorrect !"), backgroundColor: Colors.red));
+          return false; // Rejeté !
+        }
+      }
+
+      // 2. Le compte est nouveau OU le mot de passe est bon -> On Upsert (Met à jour ou Crée)
       await Supabase.instance.client.from('users').upsert({
         'pseudo': newPseudo,
+        'password': pwd, // Sauvegarde du mot de passe
         'prenom': fName,
         'nom': lName,
         'adresse': addr
       });
+
     } catch (e) {
-      dev.log("Erreur Upsert Supabase: $e");
+      dev.log("Erreur Connexion Supabase: $e");
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Erreur de connexion au serveur"), backgroundColor: Colors.orange));
+      return false;
     }
 
+    // 3. Sauvegarde locale si tout s'est bien passé
     await prefs.setString('saved_pseudo', newPseudo);
+    await prefs.setString('saved_password', pwd);
     await prefs.setString('saved_transport', transport);
     await prefs.setString('saved_firstname', fName);
     await prefs.setString('saved_lastname', lName);
@@ -205,6 +212,7 @@ class _MainLogicState extends State<MainLogic> {
 
     setState(() {
       user['name'] = newPseudo;
+      user['password'] = pwd;
       user['transport'] = transport;
       user['firstName'] = fName;
       user['lastName'] = lName;
@@ -482,7 +490,7 @@ class _WelcomeStep extends StatelessWidget {
 
 class _ProfileStep extends StatefulWidget {
   final Map<String, String> user;
-  final Future<bool> Function(String, String, String, String, String) onSave;
+  final Future<bool> Function(String, String, String, String, String, String) onSave; // +1 param (password)
 
   const _ProfileStep({required this.user, required this.onSave});
 
@@ -492,6 +500,7 @@ class _ProfileStep extends StatefulWidget {
 
 class _ProfileStepState extends State<_ProfileStep> {
   late TextEditingController _nameCtrl;
+  late TextEditingController _pwdCtrl; // Controleur de mot de passe
   late TextEditingController _fNameCtrl;
   late TextEditingController _lNameCtrl;
   late TextEditingController _addrCtrl;
@@ -502,6 +511,7 @@ class _ProfileStepState extends State<_ProfileStep> {
   void initState() {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.user['name']);
+    _pwdCtrl = TextEditingController(text: widget.user['password']);
     _fNameCtrl = TextEditingController(text: widget.user['firstName']);
     _lNameCtrl = TextEditingController(text: widget.user['lastName']);
     _addrCtrl = TextEditingController(text: widget.user['address']);
@@ -511,6 +521,7 @@ class _ProfileStepState extends State<_ProfileStep> {
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _pwdCtrl.dispose();
     _fNameCtrl.dispose();
     _lNameCtrl.dispose();
     _addrCtrl.dispose();
@@ -519,10 +530,16 @@ class _ProfileStepState extends State<_ProfileStep> {
 
   Future<void> _submitProfile() async {
     final pseudo = _nameCtrl.text.trim();
-    if (pseudo.isEmpty) return;
+    final pwd = _pwdCtrl.text.trim();
+    
+    // Oblige l'utilisateur à mettre un pseudo et un mot de passe
+    if (pseudo.isEmpty || pwd.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Le pseudo et le mot de passe sont obligatoires."), backgroundColor: Colors.orange));
+      return;
+    }
     
     setState(() => _isLoading = true);
-    bool success = await widget.onSave(pseudo, _currentTransport, _fNameCtrl.text.trim(), _lNameCtrl.text.trim(), _addrCtrl.text.trim());
+    bool success = await widget.onSave(pseudo, pwd, _currentTransport, _fNameCtrl.text.trim(), _lNameCtrl.text.trim(), _addrCtrl.text.trim());
     if (mounted && !success) setState(() => _isLoading = false);
   }
 
@@ -532,16 +549,26 @@ class _ProfileStepState extends State<_ProfileStep> {
       padding: const EdgeInsets.all(35), 
       child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
         const SizedBox(height: 40),
-        const Text('Votre Profil', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+        const Text('Profil & Connexion', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
         const SizedBox(height: 30),
+        
+        // PSEUDO ET MOT DE PASSE
         TextField(
           controller: _nameCtrl,
-          decoration: InputDecoration(hintText: 'Pseudo (Obligatoire)', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+          decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
-        const SizedBox(height: 15),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _pwdCtrl,
+          obscureText: true, // Cache le texte (mot de passe)
+          decoration: InputDecoration(hintText: 'Mot de passe / Code PIN', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+        ),
+        const SizedBox(height: 25),
+        
+        // AUTRES CHAMPS
         Row(
           children: [
-            Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom (Optionnel)', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
+            Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
             const SizedBox(width: 15),
             Expanded(child: TextField(controller: _lNameCtrl, decoration: InputDecoration(hintText: 'Nom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
           ],
@@ -552,6 +579,7 @@ class _ProfileStepState extends State<_ProfileStep> {
           decoration: InputDecoration(hintText: 'Ville / Adresse (Optionnel)', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
         const SizedBox(height: 30),
+        
         const Text('Transport par défaut :', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
         const SizedBox(height: 10),
         Wrap(spacing: 12, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
@@ -559,6 +587,7 @@ class _ProfileStepState extends State<_ProfileStep> {
           onSelected: (_) => setState(() => _currentTransport = m),
         )).toList()),
         const SizedBox(height: 50),
+        
         ElevatedButton(
           style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
           onPressed: _isLoading ? null : _submitProfile,
@@ -752,7 +781,6 @@ class _DashboardStepState extends State<_DashboardStep> {
           )
         ),
       ]),
-      // 👇 LE BOUTON FLOTTANT MIS À JOUR ICI 👇
       floatingActionButton: FloatingActionButton.extended(
         onPressed: widget.onAdd, backgroundColor: const Color(0xFF6366f1),
         label: const Text("CRÉER UN SALON", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
@@ -884,7 +912,6 @@ class _CreateModalState extends State<_CreateModal> {
       TextField(controller: _titleController, decoration: InputDecoration(hintText: 'Titre de l\'annonce', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none))),
       const SizedBox(height: 15),
       
-      // 👇 LE CHAMP DESCRIPTION AJOUTÉ ICI 👇
       TextField(
         controller: _descController, 
         maxLines: 2, 
@@ -904,7 +931,6 @@ class _CreateModalState extends State<_CreateModal> {
       ]),
       const SizedBox(height: 35),
       
-      // 👇 LE BOUTON DE VALIDATION MIS À JOUR ICI 👇
       ElevatedButton(
         style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
         onPressed: () {
