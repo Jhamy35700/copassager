@@ -167,31 +167,38 @@ class _MainLogicState extends State<MainLogic> {
   }
 
   // LOGIQUE DE CONNEXION / INSCRIPTION UNIFIÉE
-  Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
+ Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
     final prefs = await SharedPreferences.getInstance();
 
     try {
-      // 1. On cherche si le pseudo existe déjà dans Supabase
+      // 1. On cherche le compte (ATTENTION : Postgres est sensible aux majuscules ! 'jhamy35' n'est pas 'Jhamy35')
       final data = await Supabase.instance.client
           .from('users')
-          .select() // On récupère tout
+          .select() 
           .eq('pseudo', newPseudo)
           .maybeSingle();
 
       if (data != null) {
-        dev.log("Comparaison -> BDD : '${data['password']}' | Tapé : '$pwd'");
-        // LE COMPTE EXISTE : On vérifie le mot de passe
-        // (On autorise aussi si le mot de passe BDD est vide, pour migrer tes vieux tests)
-        if (data['password'] != null && data['password'] != pwd) {
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo existe déjà. Mot de passe incorrect !"), backgroundColor: Colors.red));
-          return false; // Rejeté !
+        // 2. On récupère le mot de passe de la BDD et on supprime les éventuels espaces invisibles !
+        String dbPwd = data['password'] != null ? data['password'].toString().trim() : "";
+        
+        if (dbPwd.isNotEmpty && dbPwd != pwd) {
+          if (mounted) {
+            // 👇 MESSAGE DE DEBUGGING SUR PUISSANT 👇
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text("ERREUR : BDD a lu '$dbPwd' et vous avez tapé '$pwd'"), 
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 10), // Reste affiché 10 secondes pour avoir le temps de lire
+            ));
+          }
+          return false; 
         }
       }
 
-      // 2. Le compte est nouveau OU le mot de passe est bon -> On Upsert (Met à jour ou Crée)
+      // 3. Si on arrive ici, tout est bon (nouveau compte ou bon mot de passe)
       await Supabase.instance.client.from('users').upsert({
         'pseudo': newPseudo,
-        'password': pwd, // Sauvegarde du mot de passe
+        'password': pwd, 
         'prenom': fName,
         'nom': lName,
         'adresse': addr
@@ -199,11 +206,11 @@ class _MainLogicState extends State<MainLogic> {
 
     } catch (e) {
       dev.log("Erreur Connexion Supabase: $e");
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Erreur de connexion au serveur"), backgroundColor: Colors.orange));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur serveur : $e"), backgroundColor: Colors.orange));
       return false;
     }
 
-    // 3. Sauvegarde locale si tout s'est bien passé
+    // 4. Sauvegarde locale
     await prefs.setString('saved_pseudo', newPseudo);
     await prefs.setString('saved_password', pwd);
     await prefs.setString('saved_transport', transport);
