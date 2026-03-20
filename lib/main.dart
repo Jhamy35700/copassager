@@ -149,6 +149,7 @@ class _MainLogicState extends State<MainLogic> {
   @override
   void initState() {
     super.initState();
+    _requestNotificationPermission();
     _loadVersion();
     _loadSavedProfile(); 
   }
@@ -167,6 +168,12 @@ class _MainLogicState extends State<MainLogic> {
       final packageInfo = await PackageInfo.fromPlatform();
       setState(() => _appVersion = "${packageInfo.version}+${packageInfo.buildNumber}");
     } catch (e) { dev.log("Erreur version: $e"); }
+  }
+
+  Future<void> _requestNotificationPermission() async {
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
   }
 
   Future<void> _loadSavedProfile() async {
