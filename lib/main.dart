@@ -5,6 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:developer' as dev;
 import 'dart:typed_data';
 import 'dart:io' show Platform;
+import 'dart:async'; 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -73,7 +74,8 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    Future.delayed(const Duration(seconds: 2), () {
+    // Délai recommandé d'1 seconde pour l'initialisation des composants
+    Future.delayed(const Duration(seconds: 1), () {
       if (mounted) {
         Navigator.pushReplacement(
           context, 
@@ -139,12 +141,25 @@ class _MainLogicState extends State<MainLogic> {
   String? _connectedPeerId;
 
   final List<Map<String, dynamic>> _rooms = [];
+  
+// On remplace le simple écouteur par un "Dictionnaire d'écouteurs" 
+  // pour pouvoir écouter plusieurs salons rejoints en même temps en arrière-plan.
+final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscriptions = {};
 
   @override
   void initState() {
     super.initState();
     _loadVersion();
     _loadSavedProfile(); 
+  }
+
+ @override
+  void dispose() {
+    _roomsSubscription?.cancel();
+    for (var sub in _chatSubscriptions.values) {
+      sub.cancel();
+    }
+    super.dispose();
   }
 
   Future<void> _loadVersion() async {
@@ -158,7 +173,7 @@ class _MainLogicState extends State<MainLogic> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       user['name'] = prefs.getString('saved_pseudo') ?? "";
-      user['password'] = prefs.getString('saved_password') ?? ""; // NOUVEAU
+      user['password'] = prefs.getString('saved_password') ?? ""; 
       user['transport'] = prefs.getString('saved_transport') ?? "avion";
       user['firstName'] = prefs.getString('saved_firstname') ?? "";
       user['lastName'] = prefs.getString('saved_lastname') ?? "";
@@ -166,12 +181,10 @@ class _MainLogicState extends State<MainLogic> {
     });
   }
 
-  // LOGIQUE DE CONNEXION / INSCRIPTION UNIFIÉE
- Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
+  Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
     final prefs = await SharedPreferences.getInstance();
 
     try {
-      // 1. On cherche le compte (ATTENTION : Postgres est sensible aux majuscules ! 'jhamy35' n'est pas 'Jhamy35')
       final data = await Supabase.instance.client
           .from('users')
           .select() 
@@ -179,23 +192,19 @@ class _MainLogicState extends State<MainLogic> {
           .maybeSingle();
 
       if (data != null) {
-        // 2. On récupère le mot de passe de la BDD et on supprime les éventuels espaces invisibles !
         String dbPwd = data['password'] != null ? data['password'].toString().trim() : "";
         
         if (dbPwd.isNotEmpty && dbPwd != pwd) {
           if (mounted) {
-            // 👇 MESSAGE DE DEBUGGING SUR PUISSANT 👇
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text("ERREUR : BDD a lu '$dbPwd' et vous avez tapé '$pwd'"), 
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text("Ce pseudo existe déjà. Mot de passe incorrect !"), 
               backgroundColor: Colors.red,
-              duration: const Duration(seconds: 10), // Reste affiché 10 secondes pour avoir le temps de lire
             ));
           }
           return false; 
         }
       }
 
-      // 3. Si on arrive ici, tout est bon (nouveau compte ou bon mot de passe)
       await Supabase.instance.client.from('users').upsert({
         'pseudo': newPseudo,
         'password': pwd, 
@@ -210,7 +219,6 @@ class _MainLogicState extends State<MainLogic> {
       return false;
     }
 
-    // 4. Sauvegarde locale
     await prefs.setString('saved_pseudo', newPseudo);
     await prefs.setString('saved_password', pwd);
     await prefs.setString('saved_transport', transport);
@@ -253,29 +261,92 @@ class _MainLogicState extends State<MainLogic> {
     }
   }
 
-  Future<void> _fetchInternetRooms() async {
+  void _listenToInternetRooms() {
     setState(() => _isSyncing = true);
+    _roomsSubscription?.cancel();
+    
     try {
-      final data = await Supabase.instance.client.from('rooms').select().order('created_at', ascending: false);
-      setState(() {
-        _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true);
-        for (var row in data) {
-          _rooms.add({
-            "id": row['id'], 
-            "author": row['author'], 
-            "title": row['title'], 
-            "desc": row['desc'], 
-            "type": row['type'], 
-            "transport": row['transport'], 
-            "trip_number": row['trip_number'],
-            "isOnline": true
-          });
-        }
+      _roomsSubscription = Supabase.instance.client
+          .from('rooms')
+          .stream(primaryKey: ['id'])
+          .order('created_at', ascending: false)
+          .listen((List<Map<String, dynamic>> data) {
+            
+        if (!mounted) return;
+        
+        setState(() {
+          _rooms.removeWhere((r) => r['isOnline'] == true && r['isMine'] != true);
+          
+          for (var row in data) {
+            if (!_rooms.any((r) => r['id'] == row['id'])) {
+              _rooms.add({
+                "id": row['id'], 
+                "author": row['author'], 
+                "title": row['title'], 
+                "desc": row['desc'], 
+                "type": row['type'], 
+                "transport": row['transport'], 
+                "trip_number": row['trip_number'],
+                "isOnline": true
+              });
+            }
+          }
+          _isSyncing = false;
+        });
+      }, onError: (error) {
+        dev.log("Erreur Stream Supabase: $error");
+        setState(() => _isSyncing = false);
       });
-    } catch (e) { dev.log("Erreur Supabase: $e"); }
-    setState(() => _isSyncing = false);
+      
+    } catch (e) { 
+      dev.log("Erreur init Stream: $e");
+      setState(() => _isSyncing = false);
+    }
   }
 
+  // 👇 NOUVEAU: ÉCOUTEUR DE MESSAGES EN TEMPS RÉEL 👇
+ void _listenToCloudMessages(Map<String, dynamic> room) {
+    String roomId = room['id'];
+    
+    // Si on écoute déjà ce salon (on l'a déjà rejoint), on ne recrée pas d'écouteur
+    if (_chatSubscriptions.containsKey(roomId)) return;
+
+    try {
+      _chatSubscriptions[roomId] = Supabase.instance.client
+          .from('messages')
+          .stream(primaryKey: ['id'])
+          .eq('room_id', roomId)
+          .order('created_at', ascending: true)
+          .listen((data) {
+        if (!mounted) return;
+        
+        // On compte combien de messages on avait avant la mise à jour
+        int previousMessageCount = _history[roomId]?.length ?? 0;
+        
+        setState(() {
+          _history[roomId] = data.map<String>((m) {
+            String prefix = m['sender_name'] == user['name'] ? "Moi: " : "Passager: ";
+            return "$prefix${m['content']}";
+          }).toList();
+        });
+
+        // LOGIQUE DE NOTIFICATION
+        // Si on a plus de messages qu'avant, que ce n'est pas le chargement initial (>0)
+        if (data.length > previousMessageCount && previousMessageCount > 0) {
+          var lastMessage = data.last;
+          
+          // Si c'est quelqu'un d'autre qui a écrit, ET qu'on n'est pas en train de regarder ce chat précis
+          bool isLookingAtThisChat = (_currentStep == 5 && _activeRoom?['id'] == roomId);
+          
+          if (lastMessage['sender_name'] != user['name'] && !isLookingAtThisChat) {
+            _showNotification("Nouveau message - ${room['title']}", lastMessage['content']);
+          }
+        }
+      }, onError: (err) => dev.log("Erreur stream msg: $err"));
+    } catch (e) {
+      dev.log("Erreur init stream msg: $e");
+    }
+  }
   Future<void> _deleteRoom(String roomId) async {
     setState(() {
       _rooms.removeWhere((r) => r['id'] == roomId);
@@ -298,7 +369,7 @@ class _MainLogicState extends State<MainLogic> {
     
     if (Platform.isIOS) {
       dev.log("iPhone détecté : Passage direct au Cloud Supabase");
-      _fetchInternetRooms();
+      _listenToInternetRooms(); 
       setState(() => _currentStep = 4);
       return;
     }
@@ -312,7 +383,7 @@ class _MainLogicState extends State<MainLogic> {
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopDiscovery();
-      _fetchInternetRooms();
+      _listenToInternetRooms(); 
       
       await Nearby().startAdvertising(
         user['name']!, Strategy.P2P_CLUSTER,
@@ -344,6 +415,14 @@ class _MainLogicState extends State<MainLogic> {
   }
 
   Future<void> _goBackToProfile() async {
+    _roomsSubscription?.cancel(); 
+    
+    // On coupe l'écoute de tous les salons rejoints
+    for (var sub in _chatSubscriptions.values) {
+      sub.cancel();
+    }
+    _chatSubscriptions.clear(); // On vide la mémoire
+    
     try {
       await Nearby().stopAdvertising();
       await Nearby().stopDiscovery();
@@ -355,10 +434,10 @@ class _MainLogicState extends State<MainLogic> {
       _currentStep = 2; 
     });
   }
-
   void _connectToPeer(Map<String, dynamic> room) async {
     _activeRoom = room;
-    _loadHistoryFromCloud(room['id']);
+    // 👇 NOUVEAU: On lance l'écoute des messages au lieu d'un simple chargement
+    _listenToCloudMessages(room);
     setState(() { _currentStep = 5; });
     
     if (room['isMine'] == true || room['isOnline'] == true) return;
@@ -381,9 +460,7 @@ class _MainLogicState extends State<MainLogic> {
       builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber) async { 
           Navigator.pop(ctx);
           final id = "room_${DateTime.now().millisecondsSinceEpoch}";
-          setState(() => _rooms.insert(0, {
-            "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber, "isMine": true, "isOnline": true
-          }));
+          
           try {
             await Supabase.instance.client.from('rooms').insert({
               "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber
@@ -391,25 +468,6 @@ class _MainLogicState extends State<MainLogic> {
           } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur Cloud: $e"), backgroundColor: Colors.red)); }
       })
     ).then((_) => setState(() => _isModalOpen = false));
-  }
-
-  Future<void> _loadHistoryFromCloud(String roomId) async {
-    try {
-      final data = await Supabase.instance.client
-          .from('messages')
-          .select()
-          .eq('room_id', roomId)
-          .order('created_at', ascending: true);
-      
-      setState(() {
-        _history[roomId] = data.map<String>((m) {
-          String prefix = m['sender_name'] == user['name'] ? "Moi: " : "Passager: ";
-          return "$prefix${m['content']}";
-        }).toList();
-      });
-    } catch (e) {
-      dev.log("Erreur historique cloud: $e");
-    }
   }
 
   @override
@@ -437,21 +495,25 @@ class _MainLogicState extends State<MainLogic> {
           onAdd: _openModal, 
           onSelect: _connectToPeer, 
           onEditProfile: _goBackToProfile,
-          onRefresh: _fetchInternetRooms, 
+          onRefresh: () async => _listenToInternetRooms(), 
           onDelete: _deleteRoom,
         );
         break;
       case 5: 
         currentWidget = _ChatStep(
           room: _activeRoom!, messages: _getMessagesFor(_activeRoom!['id']), 
-          onBack: () => setState(() => _currentStep = 4),
+          onBack: () {
+            setState(() => _currentStep = 4);
+          },
+
           onSend: (v) async {
+            // On l'ajoute localement pour l'impression de vitesse immédiate
             setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
             if (_connectedPeerId != null) Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
-            try { await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
+            try { 
+              await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
             } catch (e) { dev.log("Erreur Cloud Message: $e"); }
           },
-          onRefreshChat: () async => await _loadHistoryFromCloud(_activeRoom!['id']),
         );
         break;
       default: currentWidget = const SizedBox();
@@ -463,8 +525,11 @@ class _MainLogicState extends State<MainLogic> {
         if (didPop) return; 
         
         setState(() {
-          if (_currentStep == 5) _currentStep = 4; 
-          else if (_currentStep == 4) _currentStep = 2; 
+          if (_currentStep == 5) {
+            _currentStep = 4; // On recule juste, l'écouteur reste actif en arrière-plan !
+          }
+
+          else if (_currentStep == 4) { _roomsSubscription?.cancel(); _currentStep = 2; } 
           else if (_currentStep == 3) _currentStep = 2; 
           else if (_currentStep == 2) _currentStep = 1; 
         });
@@ -498,7 +563,7 @@ class _WelcomeStep extends StatelessWidget {
 
 class _ProfileStep extends StatefulWidget {
   final Map<String, String> user;
-  final Future<bool> Function(String, String, String, String, String, String) onSave; // +1 param (password)
+  final Future<bool> Function(String, String, String, String, String, String) onSave; 
 
   const _ProfileStep({required this.user, required this.onSave});
 
@@ -508,7 +573,7 @@ class _ProfileStep extends StatefulWidget {
 
 class _ProfileStepState extends State<_ProfileStep> {
   late TextEditingController _nameCtrl;
-  late TextEditingController _pwdCtrl; // Controleur de mot de passe
+  late TextEditingController _pwdCtrl; 
   late TextEditingController _fNameCtrl;
   late TextEditingController _lNameCtrl;
   late TextEditingController _addrCtrl;
@@ -540,7 +605,6 @@ class _ProfileStepState extends State<_ProfileStep> {
     final pseudo = _nameCtrl.text.trim();
     final pwd = _pwdCtrl.text.trim();
     
-    // Oblige l'utilisateur à mettre un pseudo et un mot de passe
     if (pseudo.isEmpty || pwd.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Le pseudo et le mot de passe sont obligatoires."), backgroundColor: Colors.orange));
       return;
@@ -560,27 +624,25 @@ class _ProfileStepState extends State<_ProfileStep> {
         const Text('Profil & Connexion', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
         const SizedBox(height: 30),
         
-        // PSEUDO ET MOT DE PASSE CORRIGÉS
         TextField(
           controller: _nameCtrl,
-          textCapitalization: TextCapitalization.none, // Empêche la majuscule automatique
-          autocorrect: false, // Désactive le correcteur
-          enableSuggestions: false, // Désactive les suggestions
+          textCapitalization: TextCapitalization.none, 
+          autocorrect: false, 
+          enableSuggestions: false, 
           decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
         const SizedBox(height: 10),
         TextField(
           controller: _pwdCtrl,
-          obscureText: true, // Cache le texte (mot de passe)
-          textCapitalization: TextCapitalization.none, // Empêche la majuscule automatique
-          autocorrect: false, // Désactive le correcteur
-          enableSuggestions: false, // Désactive les suggestions
-          keyboardType: TextInputType.visiblePassword, // Adapte le clavier
+          obscureText: true, 
+          textCapitalization: TextCapitalization.none, 
+          autocorrect: false, 
+          enableSuggestions: false, 
+          keyboardType: TextInputType.visiblePassword, 
           decoration: InputDecoration(hintText: 'Mot de passe / Code PIN', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
         const SizedBox(height: 25),
         
-        // AUTRES CHAMPS
         Row(
           children: [
             Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
@@ -764,7 +826,15 @@ class _DashboardStepState extends State<_DashboardStep> {
                           )
                       ],
                     ),
-                    subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 5),
+                        Text(r['desc'] ?? '', style: TextStyle(color: Colors.grey.shade700, fontSize: 13), maxLines: 2, overflow: TextOverflow.ellipsis),
+                        const SizedBox(height: 5),
+                        Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                      ],
+                    ),
                     trailing: r['author'] == widget.user['name'] 
                       ? IconButton(
                           icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -811,12 +881,10 @@ class _ChatStep extends StatelessWidget {
   final List<String> messages;
   final Function(String) onSend;
   final VoidCallback onBack;
-  final Future<void> Function() onRefreshChat; 
 
   const _ChatStep({
     required this.room, required this.messages, 
-    required this.onSend, required this.onBack, 
-    required this.onRefreshChat
+    required this.onSend, required this.onBack
   });
 
   @override
@@ -826,30 +894,27 @@ class _ChatStep extends StatelessWidget {
       appBar: AppBar(leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new, size: 20), onPressed: onBack), title: Text(room['title'])),
       body: Column(children: [
         Expanded(
-          child: RefreshIndicator(
-            onRefresh: onRefreshChat,
-            color: const Color(0xFF6366f1),
-            child: ListView.builder(
-              padding: const EdgeInsets.all(25),
-              itemCount: messages.length, 
-              itemBuilder: (ctx, i) {
-                bool isMe = messages[i].startsWith("Moi:");
-                return Align(
-                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: isMe ? const Color(0xFF6366f1) : Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5)]
-                    ),
-                    child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
+          // 👇 Plus besoin de "RefreshIndicator" manuel car le temps réel fait le travail !
+          child: ListView.builder(
+            padding: const EdgeInsets.all(25),
+            itemCount: messages.length, 
+            itemBuilder: (ctx, i) {
+              bool isMe = messages[i].startsWith("Moi:");
+              return Align(
+                alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isMe ? const Color(0xFF6366f1) : Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5)]
                   ),
-                );
-              }
-            ),
-          )
+                  child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
+                ),
+              );
+            }
+          ),
         ),
         Container(
           padding: const EdgeInsets.all(20),
