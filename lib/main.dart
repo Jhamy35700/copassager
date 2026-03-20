@@ -129,7 +129,7 @@ class _MainLogicState extends State<MainLogic> {
   bool _isServiceRunning = false;
   bool _isSyncing = false;
   String _activeFilter = 'TOUS';
-  String _searchQuery = ''; // Stocke la recherche textuelle
+  String _searchQuery = ''; 
   String _appVersion = "0.0.0"; 
 
   Map<String, String> user = {"name": "", "transport": "avion", "tripId": ""};
@@ -144,7 +144,7 @@ class _MainLogicState extends State<MainLogic> {
   void initState() {
     super.initState();
     _loadVersion();
-    _loadSavedProfile(); // Chargement du pseudo au démarrage
+    _loadSavedProfile(); 
   }
 
   Future<void> _loadVersion() async {
@@ -154,7 +154,6 @@ class _MainLogicState extends State<MainLogic> {
     } catch (e) { dev.log("Erreur version: $e"); }
   }
 
-  // --- NOUVELLES FONCTIONS DE PROFIL ---
   Future<void> _loadSavedProfile() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -177,7 +176,7 @@ class _MainLogicState extends State<MainLogic> {
 
         if (data != null) {
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ce pseudo est déjà pris !"), backgroundColor: Colors.red));
-          return false; // Pseudo refusé car existant
+          return false; 
         }
 
         await Supabase.instance.client.from('users').insert({'pseudo': newPseudo});
@@ -192,6 +191,7 @@ class _MainLogicState extends State<MainLogic> {
     setState(() {
       user['name'] = newPseudo;
       user['transport'] = transport;
+      _activeFilter = transport.toUpperCase();
       _currentStep = 3;
     });
     return true; 
@@ -233,10 +233,29 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isSyncing = false);
   }
 
+  // --- NOUVEAU : FONCTION DE SUPPRESSION ---
+  Future<void> _deleteRoom(String roomId) async {
+    // 1. On l'enlève de l'écran immédiatement pour que ce soit fluide
+    setState(() {
+      _rooms.removeWhere((r) => r['id'] == roomId);
+    });
+
+    // 2. On dit à Supabase de la détruire dans le Cloud
+    try {
+      await Supabase.instance.client.from('rooms').delete().eq('id', roomId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Annonce supprimée avec succès"), backgroundColor: Colors.green)
+        );
+      }
+    } catch (e) {
+      dev.log("Erreur suppression Cloud: $e");
+    }
+  }
+
   void _startNearby() async {
     if (_isServiceRunning) return;
     
-    // BYPASS IOS
     if (Platform.isIOS) {
       dev.log("iPhone détecté : Passage direct au Cloud Supabase");
       _fetchInternetRooms();
@@ -351,12 +370,12 @@ class _MainLogicState extends State<MainLogic> {
 
   @override
   Widget build(BuildContext context) {
+    Widget currentWidget;
     switch (_currentStep) {
-      case 1: return _WelcomeStep(onNext: () => setState(() => _currentStep = 2));
-      case 2: return _ProfileStep(user: user, onSave: _saveAndValidateProfile);
-      case 3: return _TripStep(onJoin: _startNearby);
+      case 1: currentWidget = _WelcomeStep(onNext: () => setState(() => _currentStep = 2)); break;
+      case 2: currentWidget = _ProfileStep(user: user, onSave: _saveAndValidateProfile); break;
+      case 3: currentWidget = _TripStep(onJoin: _startNearby); break;
       case 4: 
-        // Filtrage croisé : Transport + Recherche texte
         List<Map<String, dynamic>> filtered = _rooms.where((r) {
           bool matchFilter = _activeFilter == 'TOUS' || r['transport'].toString().toUpperCase() == _activeFilter;
           bool matchSearch = _searchQuery.isEmpty || 
@@ -366,7 +385,7 @@ class _MainLogicState extends State<MainLogic> {
           return matchFilter && matchSearch;
         }).toList();
         
-        return _DashboardStep(
+        currentWidget = _DashboardStep(
           user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, appVersion: _appVersion,
           onFilterChanged: (f) => setState(() => _activeFilter = f), 
           onSearchChanged: (s) => setState(() => _searchQuery = s),
@@ -374,23 +393,39 @@ class _MainLogicState extends State<MainLogic> {
           onSelect: _connectToPeer, 
           onEditProfile: _goBackToProfile,
           onRefresh: _fetchInternetRooms, 
+          onDelete: _deleteRoom, // ON PASSE LA NOUVELLE FONCTION AU TABLEAU DE BORD
         );
+        break;
       case 5: 
-        return _ChatStep(
-          room: _activeRoom!, 
-          messages: _getMessagesFor(_activeRoom!['id']), 
+        currentWidget = _ChatStep(
+          room: _activeRoom!, messages: _getMessagesFor(_activeRoom!['id']), 
           onBack: () => setState(() => _currentStep = 4),
           onSend: (v) async {
             setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
             if (_connectedPeerId != null) Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
-            try {
-              await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
+            try { await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
             } catch (e) { dev.log("Erreur Cloud Message: $e"); }
           },
           onRefreshChat: () async => await _loadHistoryFromCloud(_activeRoom!['id']),
         );
-      default: return const SizedBox();
+        break;
+      default: currentWidget = const SizedBox();
     }
+
+    return PopScope(
+      canPop: _currentStep == 1, 
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return; 
+        
+        setState(() {
+          if (_currentStep == 5) _currentStep = 4; 
+          else if (_currentStep == 4) _currentStep = 2; 
+          else if (_currentStep == 3) _currentStep = 2; 
+          else if (_currentStep == 2) _currentStep = 1; 
+        });
+      },
+      child: currentWidget,
+    );
   }
 }
 
@@ -416,7 +451,6 @@ class _WelcomeStep extends StatelessWidget {
   );
 }
 
-// Stateful pour gérer la sauvegarde et le bouton de chargement
 class _ProfileStep extends StatefulWidget {
   final Map<String, String> user;
   final Future<bool> Function(String, String) onSave;
@@ -488,7 +522,7 @@ class _TripStep extends StatelessWidget {
     body: Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
       const Icon(Icons.radar, size: 100, color: Color(0xFF6366f1)),
       const SizedBox(height: 40),
-      const Text('Radar Activé', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+      const Text('Activation Bluetooth', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
       const SizedBox(height: 50),
       ElevatedButton(
         style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
@@ -497,6 +531,7 @@ class _TripStep extends StatelessWidget {
     ])),
   );
 }
+
 class _DashboardStep extends StatefulWidget {
   final Map<String, String> user;
   final List<Map<String, dynamic>> rooms;
@@ -509,13 +544,14 @@ class _DashboardStep extends StatefulWidget {
   final String appVersion;
   final VoidCallback onEditProfile;
   final Future<void> Function() onRefresh; 
+  final Function(String) onDelete; // NOUVELLE FONCTION REQUISE
 
   const _DashboardStep({
     required this.user, required this.rooms, required this.isSync, 
     required this.activeFilter, required this.onFilterChanged, 
     required this.onSearchChanged, required this.onAdd, 
     required this.appVersion, required this.onSelect, 
-    required this.onEditProfile, required this.onRefresh,
+    required this.onEditProfile, required this.onRefresh, required this.onDelete,
   });
 
   @override
@@ -523,7 +559,6 @@ class _DashboardStep extends StatefulWidget {
 }
 
 class _DashboardStepState extends State<_DashboardStep> {
-  // NOUVEAU : Un contrôleur pour manipuler le texte de la barre de recherche
   final TextEditingController _searchController = TextEditingController();
 
   @override
@@ -561,7 +596,6 @@ class _DashboardStepState extends State<_DashboardStep> {
               label: Text(f), selected: widget.activeFilter == f, 
               onSelected: (_) {
                 widget.onFilterChanged(f);
-                // NOUVEAU : Si on clique sur TOUS, on vide aussi la barre de texte
                 if (f == 'TOUS') {
                   _searchController.clear();
                   widget.onSearchChanged('');
@@ -573,22 +607,20 @@ class _DashboardStepState extends State<_DashboardStep> {
             ),
           )).toList()),
         ),
-        // Barre de recherche mise à jour
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20).copyWith(bottom: 15),
           child: TextField(
-            controller: _searchController, // On attache le contrôleur
+            controller: _searchController, 
             onChanged: widget.onSearchChanged,
             decoration: InputDecoration(
               hintText: 'Rechercher une destination, un mot...',
               prefixIcon: const Icon(Icons.search, color: Color(0xFF6366f1)),
-              // NOUVEAU : Afficher une croix uniquement s'il y a du texte
               suffixIcon: _searchController.text.isNotEmpty 
                 ? IconButton(
                     icon: const Icon(Icons.clear, color: Colors.grey),
                     onPressed: () {
-                      _searchController.clear(); // Vide le champ visuellement
-                      widget.onSearchChanged(''); // Réinitialise la liste
+                      _searchController.clear(); 
+                      widget.onSearchChanged(''); 
                     },
                   ) 
                 : null,
@@ -621,7 +653,32 @@ class _DashboardStepState extends State<_DashboardStep> {
                     ),
                     title: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
                     subtitle: Text('${r['author']} • ${r['type']}', style: TextStyle(color: Colors.grey.shade500)),
-                    trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                    
+                    // --- NOUVEAU : ICONE POUBELLE OU CHEVRON ---
+                    trailing: r['author'] == widget.user['name'] 
+                      ? IconButton(
+                          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                title: const Text("Supprimer l'annonce ?"),
+                                content: const Text("Cette action est irréversible."),
+                                actions: [
+                                  TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("ANNULER")),
+                                  TextButton(
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      widget.onDelete(r['id']);
+                                    }, 
+                                    child: const Text("SUPPRIMER", style: TextStyle(color: Colors.red))
+                                  ),
+                                ],
+                              )
+                            );
+                          },
+                        )
+                      : const Icon(Icons.chevron_right, color: Colors.grey),
                   ),
                 );
               }
