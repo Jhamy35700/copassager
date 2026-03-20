@@ -9,6 +9,12 @@ import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:connectivity_plus/connectivity_plus.dart'; 
+
+// 👇 NOUVEAUX IMPORTS POUR LA CARTE 👇
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // --- INITIALISATION DES SERVICES ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -129,6 +135,7 @@ class _MainLogicState extends State<MainLogic> {
   bool _isModalOpen = false;
   bool _isServiceRunning = false;
   bool _isSyncing = false;
+  bool _isOffline = false; 
   String _activeFilter = 'TOUS';
   String _searchQuery = ''; 
   String _appVersion = "0.0.0"; 
@@ -141,10 +148,11 @@ class _MainLogicState extends State<MainLogic> {
 
   final List<Map<String, dynamic>> _rooms = [];
   
-  // VARIABLES DE TEMPS RÉEL ET D'ABONNEMENT
   StreamSubscription<List<Map<String, dynamic>>>? _roomsSubscription;
   final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscriptions = {};
-  List<String> _subscribedRooms = []; // 👈 NOUVEAU : Liste des salons suivis
+  List<String> _subscribedRooms = []; 
+  
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
 
   @override
   void initState() {
@@ -152,10 +160,25 @@ class _MainLogicState extends State<MainLogic> {
     _requestNotificationPermission();
     _loadVersion();
     _loadSavedProfile(); 
+    
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
+      if (mounted) {
+        setState(() {
+          _isOffline = results.contains(ConnectivityResult.none);
+        });
+      }
+    });
+  }
+
+  Future<void> _requestNotificationPermission() async {
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
   }
 
   @override
   void dispose() {
+    _connectivitySubscription.cancel(); 
     _roomsSubscription?.cancel();
     for (var sub in _chatSubscriptions.values) {
       sub.cancel();
@@ -163,17 +186,15 @@ class _MainLogicState extends State<MainLogic> {
     super.dispose();
   }
 
+  String _formatTime(DateTime dt) {
+    return "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
+  }
+
   Future<void> _loadVersion() async {
     try {
       final packageInfo = await PackageInfo.fromPlatform();
       setState(() => _appVersion = "${packageInfo.version}+${packageInfo.buildNumber}");
     } catch (e) { dev.log("Erreur version: $e"); }
-  }
-
-  Future<void> _requestNotificationPermission() async {
-    if (Platform.isAndroid) {
-      await Permission.notification.request();
-    }
   }
 
   Future<void> _loadSavedProfile() async {
@@ -187,13 +208,11 @@ class _MainLogicState extends State<MainLogic> {
       user['address'] = prefs.getString('saved_address') ?? "";
     });
     
-    // Si on a déjà un profil, on charge ses abonnements silencieusement
     if (user['name']!.isNotEmpty) {
       _loadUserSubscriptions();
     }
   }
 
-  // 👇 NOUVEAU : Chargement des abonnements au démarrage
   Future<void> _loadUserSubscriptions() async {
     try {
       final data = await Supabase.instance.client
@@ -205,7 +224,6 @@ class _MainLogicState extends State<MainLogic> {
         _subscribedRooms = data.map<String>((row) => row['room_id'] as String).toList();
       });
       
-      // On rallume les radios pour les salons suivis
       for (String roomId in _subscribedRooms) {
         _listenToCloudMessages(roomId);
       }
@@ -214,15 +232,14 @@ class _MainLogicState extends State<MainLogic> {
     }
   }
 
-  // 👇 NOUVEAU : Fonction pour activer/désactiver la cloche
   Future<void> _toggleSubscription(String roomId) async {
     bool isSub = _subscribedRooms.contains(roomId);
     
     setState(() {
       if (isSub) {
-        _subscribedRooms.remove(roomId); // Devient Curieux
+        _subscribedRooms.remove(roomId); 
       } else {
-        _subscribedRooms.add(roomId); // Devient Abonné
+        _subscribedRooms.add(roomId); 
       }
     });
 
@@ -293,10 +310,35 @@ class _MainLogicState extends State<MainLogic> {
       _currentStep = 3;
     });
     
-    // On charge les abonnements liés à ce profil fraîchement connecté
     _loadUserSubscriptions();
     
     return true; 
+  }
+
+  Future<void> _logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear(); 
+
+    _roomsSubscription?.cancel();
+    for (var sub in _chatSubscriptions.values) {
+      sub.cancel();
+    }
+    _chatSubscriptions.clear();
+    _subscribedRooms.clear();
+    _history.clear();
+    
+    try {
+      await Nearby().stopAdvertising();
+      await Nearby().stopDiscovery();
+    } catch (e) {
+      dev.log("Erreur arrêt Nearby: $e");
+    }
+
+    setState(() {
+      user = {"name": "", "password": "", "transport": "avion", "firstName": "", "lastName": "", "address": ""};
+      _isServiceRunning = false;
+      _currentStep = 2; 
+    });
   }
 
   List<String> _getMessagesFor(String roomId) => _history.putIfAbsent(roomId, () => []);
@@ -347,6 +389,8 @@ class _MainLogicState extends State<MainLogic> {
                 "type": row['type'], 
                 "transport": row['transport'], 
                 "trip_number": row['trip_number'],
+                "lat": row['lat'], // 👈 Récupère la latitude
+                "lng": row['lng'], // 👈 Récupère la longitude
                 "isOnline": true
               });
             }
@@ -390,9 +434,8 @@ class _MainLogicState extends State<MainLogic> {
           bool isLookingAtThisChat = (_currentStep == 5 && _activeRoom?['id'] == roomId);
           
           if (lastMessage['sender_name'] != user['name'] && !isLookingAtThisChat) {
-            // Récupère le titre du salon pour la notification
             String roomTitle = "Nouveau message";
-            try { roomTitle = _rooms.firstWhere((r) => r['id'] == roomId)['title']; } catch(e) {}
+            try { roomTitle = _rooms.firstWhere((r) => r['id'] == roomId)['title']; } catch(e) { dev.log("Titre introuvable"); }
             
             _showNotification(roomTitle, lastMessage['content']);
           }
@@ -492,7 +535,6 @@ class _MainLogicState extends State<MainLogic> {
 
   void _connectToPeer(Map<String, dynamic> room) async {
     _activeRoom = room;
-    // On allume la radio quand on entre (même si on est juste curieux)
     _listenToCloudMessages(room['id']);
     setState(() { _currentStep = 5; });
     
@@ -513,16 +555,18 @@ class _MainLogicState extends State<MainLogic> {
     setState(() => _isModalOpen = true);
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: Colors.transparent,
-      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber) async { 
+      // 👇 La signature onPublish inclut maintenant lat et lng 👇
+      builder: (ctx) => _CreateModal(activeFilter: _activeFilter, onPublish: (title, desc, type, transport, tripNumber, lat, lng) async { 
           Navigator.pop(ctx);
           final id = "room_${DateTime.now().millisecondsSinceEpoch}";
           
           try {
             await Supabase.instance.client.from('rooms').insert({
-              "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber
+              "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber,
+              "lat": lat, "lng": lng // 👈 Sauvegarde dans Supabase
             });
-            // Auto-abonnement au salon qu'on vient de créer
             _toggleSubscription(id);
+            _listenToInternetRooms();
           } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur Cloud: $e"), backgroundColor: Colors.red)); }
       })
     ).then((_) => setState(() => _isModalOpen = false));
@@ -547,7 +591,7 @@ class _MainLogicState extends State<MainLogic> {
         }).toList();
         
         currentWidget = _DashboardStep(
-          user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, appVersion: _appVersion,
+          user: user, rooms: filtered, isSync: _isSyncing, activeFilter: _activeFilter, appVersion: _appVersion, isOffline: _isOffline,
           onFilterChanged: (f) => setState(() => _activeFilter = f), 
           onSearchChanged: (s) => setState(() => _searchQuery = s),
           onAdd: _openModal, 
@@ -555,17 +599,18 @@ class _MainLogicState extends State<MainLogic> {
           onEditProfile: _goBackToProfile,
           onRefresh: () async => _listenToInternetRooms(), 
           onDelete: _deleteRoom,
+          onLogout: _logout, 
         );
         break;
       case 5: 
         currentWidget = _ChatStep(
           room: _activeRoom!, 
           messages: _getMessagesFor(_activeRoom!['id']), 
-          isSubscribed: _subscribedRooms.contains(_activeRoom!['id']), // 👈 NOUVEAU
-          onToggleSubscribe: () => _toggleSubscription(_activeRoom!['id']), // 👈 NOUVEAU
+          isSubscribed: _subscribedRooms.contains(_activeRoom!['id']), 
+          isOffline: _isOffline,
+          onToggleSubscribe: () => _toggleSubscription(_activeRoom!['id']), 
           onBack: () {
             setState(() {
-              // Si on n'est pas abonné, on coupe la radio en sortant
               if (!_subscribedRooms.contains(_activeRoom!['id'])) {
                 _chatSubscriptions[_activeRoom!['id']]?.cancel();
                 _chatSubscriptions.remove(_activeRoom!['id']);
@@ -574,12 +619,12 @@ class _MainLogicState extends State<MainLogic> {
             });
           },
           onSend: (v) async {
-            // Auto-abonnement quand on participe (Le Bavard)
             if (!_subscribedRooms.contains(_activeRoom!['id'])) {
               _toggleSubscription(_activeRoom!['id']);
             }
             
             setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
+            
             if (_connectedPeerId != null) Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
             try { 
               await Supabase.instance.client.from('messages').insert({'room_id': _activeRoom!['id'], 'sender_name': user['name'], 'content': v});
@@ -597,7 +642,6 @@ class _MainLogicState extends State<MainLogic> {
         
         setState(() {
           if (_currentStep == 5) {
-            // Logique intelligente sur le bouton retour physique
             if (!_subscribedRooms.contains(_activeRoom!['id'])) {
               _chatSubscriptions[_activeRoom!['id']]?.cancel();
               _chatSubscriptions.remove(_activeRoom!['id']);
@@ -605,8 +649,8 @@ class _MainLogicState extends State<MainLogic> {
             _currentStep = 4; 
           }
           else if (_currentStep == 4) { _goBackToProfile(); } 
-          else if (_currentStep == 3) _currentStep = 2; 
-          else if (_currentStep == 2) _currentStep = 1; 
+          else if (_currentStep == 3) { _currentStep = 2; } 
+          else if (_currentStep == 2) { _currentStep = 1; } 
         });
       },
       child: currentWidget,
@@ -692,62 +736,111 @@ class _ProfileStepState extends State<_ProfileStep> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    body: SingleChildScrollView(
-      padding: const EdgeInsets.all(35), 
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const SizedBox(height: 40),
-        const Text('Profil & Connexion', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 30),
-        
-        TextField(
-          controller: _nameCtrl,
-          textCapitalization: TextCapitalization.none, 
-          autocorrect: false, 
-          enableSuggestions: false, 
-          decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+    body: Container(
+      width: double.infinity,
+      height: double.infinity,
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFF6366f1), Color(0xFF8b5cf6)], 
+          begin: Alignment.topLeft, end: Alignment.bottomRight
         ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: _pwdCtrl,
-          obscureText: true, 
-          textCapitalization: TextCapitalization.none, 
-          autocorrect: false, 
-          enableSuggestions: false, 
-          keyboardType: TextInputType.visiblePassword, 
-          decoration: InputDecoration(hintText: 'Mot de passe / Code PIN', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+      ),
+      child: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 25, vertical: 20), 
+            child: Card(
+              elevation: 15,
+              shadowColor: Colors.black26,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(35)),
+              child: Padding(
+                padding: const EdgeInsets.all(35),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  
+                  CircleAvatar(
+                    radius: 45,
+                    backgroundColor: const Color(0xFF6366f1).withValues(alpha: 0.1),
+                    child: const Icon(Icons.person_pin, size: 50, color: Color(0xFF6366f1)),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text('Votre Profil', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, letterSpacing: -0.5)),
+                  const SizedBox(height: 5),
+                  Text('Connectez-vous pour rejoindre la communauté', style: TextStyle(fontSize: 13, color: Colors.grey.shade500), textAlign: TextAlign.center,),
+                  const SizedBox(height: 35),
+                  
+                  TextField(
+                    controller: _nameCtrl,
+                    textCapitalization: TextCapitalization.none, 
+                    autocorrect: false, 
+                    enableSuggestions: false, 
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.alternate_email, color: Colors.grey),
+                      hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, 
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _pwdCtrl,
+                    obscureText: true, 
+                    textCapitalization: TextCapitalization.none, 
+                    autocorrect: false, 
+                    enableSuggestions: false, 
+                    keyboardType: TextInputType.visiblePassword, 
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.lock_outline, color: Colors.grey),
+                      hintText: 'Mot de passe', filled: true, fillColor: Colors.grey.shade100, 
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)
+                    ),
+                  ),
+                  
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 20),
+                    child: Divider(color: Colors.black12),
+                  ),
+                  
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
+                      const SizedBox(width: 12),
+                      Expanded(child: TextField(controller: _lNameCtrl, decoration: InputDecoration(hintText: 'Nom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _addrCtrl,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.place_outlined, color: Colors.grey),
+                      hintText: 'Ville / Adresse', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)
+                    ),
+                  ),
+                  const SizedBox(height: 25),
+                  
+                  const Align(alignment: Alignment.centerLeft, child: Text('Transport favori :', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold))),
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 8, runSpacing: 8, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
+                    label: Text(m.toUpperCase(), style: const TextStyle(fontSize: 12)), 
+                    selected: _currentTransport == m, 
+                    showCheckmark: false,
+                    selectedColor: const Color(0xFF6366f1),
+                    labelStyle: TextStyle(color: _currentTransport == m ? Colors.white : Colors.black87, fontWeight: FontWeight.bold),
+                    onSelected: (_) => setState(() => _currentTransport = m),
+                  )).toList()),
+                  const SizedBox(height: 40),
+                  
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 60), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+                    onPressed: _isLoading ? null : _submitProfile,
+                    child: _isLoading 
+                        ? const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
+                        : const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  ),
+                ]),
+              ),
+            ),
+          ),
         ),
-        const SizedBox(height: 25),
-        
-        Row(
-          children: [
-            Expanded(child: TextField(controller: _fNameCtrl, decoration: InputDecoration(hintText: 'Prénom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
-            const SizedBox(width: 15),
-            Expanded(child: TextField(controller: _lNameCtrl, decoration: InputDecoration(hintText: 'Nom', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)))),
-          ],
-        ),
-        const SizedBox(height: 15),
-        TextField(
-          controller: _addrCtrl,
-          decoration: InputDecoration(hintText: 'Ville / Adresse (Optionnel)', filled: true, fillColor: Colors.grey.shade50, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
-        ),
-        const SizedBox(height: 30),
-        
-        const Text('Transport par défaut :', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 10),
-        Wrap(spacing: 12, children: ['avion', 'train', 'autocar', 'bateau'].map((m) => ChoiceChip(
-          label: Text(m.toUpperCase()), selected: _currentTransport == m, 
-          onSelected: (_) => setState(() => _currentTransport = m),
-        )).toList()),
-        const SizedBox(height: 50),
-        
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
-          onPressed: _isLoading ? null : _submitProfile,
-          child: _isLoading 
-              ? const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
-              : const Text('CONTINUER', style: TextStyle(fontWeight: FontWeight.bold)),
-        ),
-      ]),
+      ),
     ),
   );
 }
@@ -774,6 +867,7 @@ class _DashboardStep extends StatefulWidget {
   final Map<String, String> user;
   final List<Map<String, dynamic>> rooms;
   final bool isSync;
+  final bool isOffline; 
   final String activeFilter;
   final Function(String) onFilterChanged;
   final Function(String) onSearchChanged;
@@ -783,13 +877,15 @@ class _DashboardStep extends StatefulWidget {
   final VoidCallback onEditProfile;
   final Future<void> Function() onRefresh; 
   final Function(String) onDelete;
+  final VoidCallback onLogout; 
 
   const _DashboardStep({
-    required this.user, required this.rooms, required this.isSync, 
+    required this.user, required this.rooms, required this.isSync, required this.isOffline,
     required this.activeFilter, required this.onFilterChanged, 
     required this.onSearchChanged, required this.onAdd, 
     required this.appVersion, required this.onSelect, 
     required this.onEditProfile, required this.onRefresh, required this.onDelete,
+    required this.onLogout,
   });
 
   @override
@@ -810,20 +906,45 @@ class _DashboardStepState extends State<_DashboardStep> {
     return Scaffold(
       body: Column(children: [
         Container(
-          padding: const EdgeInsets.fromLTRB(25, 65, 25, 35),
+          padding: const EdgeInsets.fromLTRB(25, 65, 25, 20), 
           decoration: const BoxDecoration(
             gradient: LinearGradient(colors: [Color(0xFF6366f1), Color(0xFF8b5cf6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
             borderRadius: BorderRadius.vertical(bottom: Radius.circular(35))
           ),
-          child: Row(children: [
-            GestureDetector(onTap: widget.onEditProfile, child: const CircleAvatar(radius: 28, backgroundColor: Colors.white24, child: Icon(Icons.edit, color: Colors.white))),
-            const SizedBox(width: 15),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(widget.appVersion, style: const TextStyle(color: Colors.white70, fontSize: 10)),
-              Text(widget.user['name']!, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-            ])),
-            if (widget.isSync) const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
-          ]),
+          child: Column(
+            children: [
+              Row(children: [
+                GestureDetector(onTap: widget.onEditProfile, child: const CircleAvatar(radius: 28, backgroundColor: Colors.white24, child: Icon(Icons.edit, color: Colors.white))),
+                const SizedBox(width: 15),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(widget.appVersion, style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                  Text(widget.user['name']!, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                ])),
+                if (widget.isSync) const SizedBox(width: 25, height: 25, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
+                const SizedBox(width: 10),
+                
+                IconButton(
+                  icon: const Icon(Icons.logout, color: Colors.white),
+                  onPressed: widget.onLogout,
+                  tooltip: 'Se déconnecter',
+                )
+              ]),
+              if (widget.isOffline)
+                Container(
+                  margin: const EdgeInsets.only(top: 20),
+                  padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+                  decoration: BoxDecoration(color: Colors.orange.shade400, borderRadius: BorderRadius.circular(15)),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.wifi_off, color: Colors.white, size: 16),
+                      SizedBox(width: 8),
+                      Text("Mode Bluetooth (Réseau perdu)", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                    ]
+                  )
+                ),
+            ],
+          ),
         ),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
@@ -892,7 +1013,19 @@ class _DashboardStepState extends State<_DashboardStep> {
                     title: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Expanded(child: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17), overflow: TextOverflow.ellipsis)),
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Flexible(child: Text(r['title'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17), overflow: TextOverflow.ellipsis)),
+                              // 👇 Icône Map dans la liste si position définie
+                              if (r['lat'] != null && r['lng'] != null)
+                                const Padding(
+                                  padding: EdgeInsets.only(left: 6),
+                                  child: Icon(Icons.location_on, size: 16, color: Colors.redAccent),
+                                )
+                            ],
+                          )
+                        ),
                         if (r['trip_number'] != null && r['trip_number'].toString().isNotEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -953,14 +1086,15 @@ class _DashboardStepState extends State<_DashboardStep> {
 
 class _ChatStep extends StatelessWidget {
   final Map<String, dynamic> room;
-  final List<String> messages;
-  final bool isSubscribed; // 👈 NOUVEAU
-  final VoidCallback onToggleSubscribe; // 👈 NOUVEAU
+  final List<String> messages; 
+  final bool isSubscribed; 
+  final bool isOffline;
+  final VoidCallback onToggleSubscribe; 
   final Function(String) onSend;
   final VoidCallback onBack;
 
   const _ChatStep({
-    required this.room, required this.messages, required this.isSubscribed, 
+    required this.room, required this.messages, required this.isSubscribed, required this.isOffline,
     required this.onToggleSubscribe, required this.onSend, required this.onBack
   });
 
@@ -970,9 +1104,41 @@ class _ChatStep extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new, size: 20), onPressed: onBack), 
-        title: Text(room['title']),
-        // 👇 LA FAMEUSE CLOCHE EST LÀ 👇
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(room['title'], style: const TextStyle(fontSize: 18)),
+            if (isOffline)
+              const Text("Mode Bluetooth", style: TextStyle(fontSize: 11, color: Colors.orange)),
+          ],
+        ),
         actions: [
+          // ✅ BOUTON CARTE CORRIGÉ
+          if (room['lat'] != null && room['lng'] != null)
+            IconButton(
+              icon: const Icon(Icons.map_outlined, color: Colors.blueAccent),
+              tooltip: "Voir le point de rendez-vous",
+              onPressed: () async {
+                // Utilisation de l'URL de recherche Google Maps officielle
+                final String googleMapsUrl = "https://www.google.com/maps/search/?api=1&query=${room['lat']},${room['lng']}";
+                final Uri uri = Uri.parse(googleMapsUrl);
+
+                try {
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  } else {
+                    // Si canLaunchUrl bloque, on tente quand même le lancement forcé
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text("Erreur lors de l'ouverture de la carte : $e"))
+                    );
+                  }
+                }
+              },
+            ),
           IconButton(
             icon: Icon(isSubscribed ? Icons.notifications_active : Icons.notifications_off_outlined),
             color: isSubscribed ? Colors.green : Colors.grey,
@@ -998,7 +1164,10 @@ class _ChatStep extends StatelessWidget {
                     borderRadius: BorderRadius.circular(20),
                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5)]
                   ),
-                  child: Text(messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), style: TextStyle(color: isMe ? Colors.white : Colors.black87)),
+                  child: Text(
+                    messages[i].replaceFirst(isMe ? "Moi: " : "Passager: ", ""), 
+                    style: TextStyle(color: isMe ? Colors.white : Colors.black87)
+                  ),
                 ),
               );
             }
@@ -1024,7 +1193,8 @@ class _ChatStep extends StatelessWidget {
 
 class _CreateModal extends StatefulWidget {
   final String activeFilter;
-  final Function(String, String, String, String, String) onPublish; 
+  // 👇 NOUVELLE SIGNATURE avec lat et lng
+  final Function(String, String, String, String, String, double?, double?) onPublish; 
   const _CreateModal({required this.activeFilter, required this.onPublish});
   @override
   State<_CreateModal> createState() => _CreateModalState();
@@ -1036,6 +1206,10 @@ class _CreateModalState extends State<_CreateModal> {
   final _titleController = TextEditingController();
   final _descController = TextEditingController();
   final _tripNumberController = TextEditingController();
+  
+  // 👇 NOUVEAU: Variables pour la carte
+  double _selectedLat = 48.1173; // Centré sur Rennes par défaut !
+  double _selectedLng = -1.6778; 
 
   @override
   void initState() {
@@ -1092,6 +1266,54 @@ class _CreateModalState extends State<_CreateModal> {
       ),
       const SizedBox(height: 15),
 
+      // 👇 INTÉGRATION DE LA CARTE 👇
+      const Text('Point de rendez-vous (Optionnel) :', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 13)),
+      const SizedBox(height: 10),
+      SizedBox(
+        height: 150,
+        width: double.infinity,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(20),
+          child: Stack(
+            children: [
+              FlutterMap(
+                options: MapOptions(
+                  initialCenter: LatLng(_selectedLat, _selectedLng),
+                  initialZoom: 13.0,
+                  onPositionChanged: (camera, hasGesture) {
+                    _selectedLat = camera.center.latitude;
+                    _selectedLng = camera.center.longitude;
+                  },
+                ),
+                children: [
+                  TileLayer(
+                    urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    userAgentPackageName: 'com.copassager.app',
+                  ),
+                ],
+              ),
+              // Épingle fixe au centre
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: 40), // Décale légèrement l'icône vers le haut pour pointer le centre
+                  child: Icon(Icons.location_on, size: 40, color: Colors.red),
+                ),
+              ),
+              // Petit bandeau d'instruction
+              Positioned(
+                top: 8, left: 8, right: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(10)),
+                  child: const Text("Glissez pour placer l'épingle", textAlign: TextAlign.center, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                ),
+              )
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 20),
+
       Row(children: [
         Expanded(child: ChoiceChip(label: const Center(child: Text('OFFRE')), selected: _selectedType == 'OFFRE', onSelected: (_) => setState(() => _selectedType = 'OFFRE'))),
         const SizedBox(width: 15),
@@ -1103,7 +1325,8 @@ class _CreateModalState extends State<_CreateModal> {
         style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 65), backgroundColor: const Color(0xFF6366f1), foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
         onPressed: () {
           if (_titleController.text.isNotEmpty) {
-            widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport, _tripNumberController.text.trim());
+            // Envoi des coordonnées avec le reste des infos
+            widget.onPublish(_titleController.text, _descController.text, _selectedType, _selectedTransport, _tripNumberController.text.trim(), _selectedLat, _selectedLng);
           }
         }, 
         child: const Text('CRÉER LE SALON', style: TextStyle(fontWeight: FontWeight.bold))
