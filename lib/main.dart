@@ -553,15 +553,22 @@ class _ProfileStepState extends State<_ProfileStep> {
         const Text('Profil & Connexion', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
         const SizedBox(height: 30),
         
-        // PSEUDO ET MOT DE PASSE
+        // PSEUDO ET MOT DE PASSE CORRIGÉS
         TextField(
           controller: _nameCtrl,
+          textCapitalization: TextCapitalization.none, // Empêche la majuscule automatique
+          autocorrect: false, // Désactive le correcteur
+          enableSuggestions: false, // Désactive les suggestions
           decoration: InputDecoration(hintText: 'Pseudo', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
         const SizedBox(height: 10),
         TextField(
           controller: _pwdCtrl,
           obscureText: true, // Cache le texte (mot de passe)
+          textCapitalization: TextCapitalization.none, // Empêche la majuscule automatique
+          autocorrect: false, // Désactive le correcteur
+          enableSuggestions: false, // Désactive les suggestions
+          keyboardType: TextInputType.visiblePassword, // Adapte le clavier
           decoration: InputDecoration(hintText: 'Mot de passe / Code PIN', filled: true, fillColor: Colors.grey.shade100, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
         ),
         const SizedBox(height: 25),
