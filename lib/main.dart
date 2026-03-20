@@ -74,7 +74,6 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    // Délai recommandé d'1 seconde pour l'initialisation des composants
     Future.delayed(const Duration(seconds: 1), () {
       if (mounted) {
         Navigator.pushReplacement(
@@ -141,11 +140,11 @@ class _MainLogicState extends State<MainLogic> {
   String? _connectedPeerId;
 
   final List<Map<String, dynamic>> _rooms = [];
-  StreamSubscription<List<Map<String, dynamic>>>? _roomsSubscription;
   
-// On remplace le simple écouteur par un "Dictionnaire d'écouteurs" 
-  // pour pouvoir écouter plusieurs salons rejoints en même temps en arrière-plan.
-final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscriptions = {};
+  // VARIABLES DE TEMPS RÉEL ET D'ABONNEMENT
+  StreamSubscription<List<Map<String, dynamic>>>? _roomsSubscription;
+  final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscriptions = {};
+  List<String> _subscribedRooms = []; // 👈 NOUVEAU : Liste des salons suivis
 
   @override
   void initState() {
@@ -154,7 +153,7 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
     _loadSavedProfile(); 
   }
 
- @override
+  @override
   void dispose() {
     _roomsSubscription?.cancel();
     for (var sub in _chatSubscriptions.values) {
@@ -180,6 +179,55 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
       user['lastName'] = prefs.getString('saved_lastname') ?? "";
       user['address'] = prefs.getString('saved_address') ?? "";
     });
+    
+    // Si on a déjà un profil, on charge ses abonnements silencieusement
+    if (user['name']!.isNotEmpty) {
+      _loadUserSubscriptions();
+    }
+  }
+
+  // 👇 NOUVEAU : Chargement des abonnements au démarrage
+  Future<void> _loadUserSubscriptions() async {
+    try {
+      final data = await Supabase.instance.client
+          .from('participants')
+          .select('room_id')
+          .eq('pseudo', user['name']!);
+          
+      setState(() {
+        _subscribedRooms = data.map<String>((row) => row['room_id'] as String).toList();
+      });
+      
+      // On rallume les radios pour les salons suivis
+      for (String roomId in _subscribedRooms) {
+        _listenToCloudMessages(roomId);
+      }
+    } catch (e) {
+      dev.log("Erreur chargement abonnements: $e");
+    }
+  }
+
+  // 👇 NOUVEAU : Fonction pour activer/désactiver la cloche
+  Future<void> _toggleSubscription(String roomId) async {
+    bool isSub = _subscribedRooms.contains(roomId);
+    
+    setState(() {
+      if (isSub) {
+        _subscribedRooms.remove(roomId); // Devient Curieux
+      } else {
+        _subscribedRooms.add(roomId); // Devient Abonné
+      }
+    });
+
+    try {
+      if (isSub) {
+        await Supabase.instance.client.from('participants').delete().eq('room_id', roomId).eq('pseudo', user['name']!);
+      } else {
+        await Supabase.instance.client.from('participants').insert({'room_id': roomId, 'pseudo': user['name']!});
+      }
+    } catch (e) {
+      dev.log("Erreur modification abonnement: $e");
+    }
   }
 
   Future<bool> _saveAndValidateProfile(String newPseudo, String pwd, String transport, String fName, String lName, String addr) async {
@@ -237,6 +285,10 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
       _activeFilter = transport.toUpperCase();
       _currentStep = 3;
     });
+    
+    // On charge les abonnements liés à ce profil fraîchement connecté
+    _loadUserSubscriptions();
+    
     return true; 
   }
 
@@ -258,7 +310,7 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
     if (payload.type == PayloadType.BYTES) {
       String msg = String.fromCharCodes(payload.bytes!);
       setState(() => _getMessagesFor(id).add("Passager: $msg"));
-      if (_currentStep != 5) _showNotification("Nouveau message", msg);
+      if (_currentStep != 5) _showNotification("Nouveau message Bluetooth", msg);
     }
   }
 
@@ -305,11 +357,7 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
     }
   }
 
-  // 👇 NOUVEAU: ÉCOUTEUR DE MESSAGES EN TEMPS RÉEL 👇
- void _listenToCloudMessages(Map<String, dynamic> room) {
-    String roomId = room['id'];
-    
-    // Si on écoute déjà ce salon (on l'a déjà rejoint), on ne recrée pas d'écouteur
+  void _listenToCloudMessages(String roomId) {
     if (_chatSubscriptions.containsKey(roomId)) return;
 
     try {
@@ -321,7 +369,6 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
           .listen((data) {
         if (!mounted) return;
         
-        // On compte combien de messages on avait avant la mise à jour
         int previousMessageCount = _history[roomId]?.length ?? 0;
         
         setState(() {
@@ -331,16 +378,16 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
           }).toList();
         });
 
-        // LOGIQUE DE NOTIFICATION
-        // Si on a plus de messages qu'avant, que ce n'est pas le chargement initial (>0)
         if (data.length > previousMessageCount && previousMessageCount > 0) {
           var lastMessage = data.last;
-          
-          // Si c'est quelqu'un d'autre qui a écrit, ET qu'on n'est pas en train de regarder ce chat précis
           bool isLookingAtThisChat = (_currentStep == 5 && _activeRoom?['id'] == roomId);
           
           if (lastMessage['sender_name'] != user['name'] && !isLookingAtThisChat) {
-            _showNotification("Nouveau message - ${room['title']}", lastMessage['content']);
+            // Récupère le titre du salon pour la notification
+            String roomTitle = "Nouveau message";
+            try { roomTitle = _rooms.firstWhere((r) => r['id'] == roomId)['title']; } catch(e) {}
+            
+            _showNotification(roomTitle, lastMessage['content']);
           }
         }
       }, onError: (err) => dev.log("Erreur stream msg: $err"));
@@ -348,6 +395,7 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
       dev.log("Erreur init stream msg: $e");
     }
   }
+
   Future<void> _deleteRoom(String roomId) async {
     setState(() {
       _rooms.removeWhere((r) => r['id'] == roomId);
@@ -417,12 +465,11 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
 
   Future<void> _goBackToProfile() async {
     _roomsSubscription?.cancel(); 
-    
-    // On coupe l'écoute de tous les salons rejoints
     for (var sub in _chatSubscriptions.values) {
       sub.cancel();
     }
-    _chatSubscriptions.clear(); // On vide la mémoire
+    _chatSubscriptions.clear();
+    _subscribedRooms.clear();
     
     try {
       await Nearby().stopAdvertising();
@@ -435,10 +482,11 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
       _currentStep = 2; 
     });
   }
+
   void _connectToPeer(Map<String, dynamic> room) async {
     _activeRoom = room;
-    // 👇 NOUVEAU: On lance l'écoute des messages au lieu d'un simple chargement
-    _listenToCloudMessages(room);
+    // On allume la radio quand on entre (même si on est juste curieux)
+    _listenToCloudMessages(room['id']);
     setState(() { _currentStep = 5; });
     
     if (room['isMine'] == true || room['isOnline'] == true) return;
@@ -466,6 +514,8 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
             await Supabase.instance.client.from('rooms').insert({
               "id": id, "author": user['name'], "title": title, "desc": desc, "type": type, "transport": transport, "trip_number": tripNumber
             });
+            // Auto-abonnement au salon qu'on vient de créer
+            _toggleSubscription(id);
           } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erreur Cloud: $e"), backgroundColor: Colors.red)); }
       })
     ).then((_) => setState(() => _isModalOpen = false));
@@ -502,13 +552,26 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
         break;
       case 5: 
         currentWidget = _ChatStep(
-          room: _activeRoom!, messages: _getMessagesFor(_activeRoom!['id']), 
+          room: _activeRoom!, 
+          messages: _getMessagesFor(_activeRoom!['id']), 
+          isSubscribed: _subscribedRooms.contains(_activeRoom!['id']), // 👈 NOUVEAU
+          onToggleSubscribe: () => _toggleSubscription(_activeRoom!['id']), // 👈 NOUVEAU
           onBack: () {
-            setState(() => _currentStep = 4);
+            setState(() {
+              // Si on n'est pas abonné, on coupe la radio en sortant
+              if (!_subscribedRooms.contains(_activeRoom!['id'])) {
+                _chatSubscriptions[_activeRoom!['id']]?.cancel();
+                _chatSubscriptions.remove(_activeRoom!['id']);
+              }
+              _currentStep = 4;
+            });
           },
-
           onSend: (v) async {
-            // On l'ajoute localement pour l'impression de vitesse immédiate
+            // Auto-abonnement quand on participe (Le Bavard)
+            if (!_subscribedRooms.contains(_activeRoom!['id'])) {
+              _toggleSubscription(_activeRoom!['id']);
+            }
+            
             setState(() => _getMessagesFor(_activeRoom!['id']).add("Moi: $v"));
             if (_connectedPeerId != null) Nearby().sendBytesPayload(_connectedPeerId!, Uint8List.fromList(v.codeUnits));
             try { 
@@ -527,10 +590,14 @@ final Map<String, StreamSubscription<List<Map<String, dynamic>>>> _chatSubscript
         
         setState(() {
           if (_currentStep == 5) {
-            _currentStep = 4; // On recule juste, l'écouteur reste actif en arrière-plan !
+            // Logique intelligente sur le bouton retour physique
+            if (!_subscribedRooms.contains(_activeRoom!['id'])) {
+              _chatSubscriptions[_activeRoom!['id']]?.cancel();
+              _chatSubscriptions.remove(_activeRoom!['id']);
+            }
+            _currentStep = 4; 
           }
-
-          else if (_currentStep == 4) { _roomsSubscription?.cancel(); _currentStep = 2; } 
+          else if (_currentStep == 4) { _goBackToProfile(); } 
           else if (_currentStep == 3) _currentStep = 2; 
           else if (_currentStep == 2) _currentStep = 1; 
         });
@@ -880,22 +947,35 @@ class _DashboardStepState extends State<_DashboardStep> {
 class _ChatStep extends StatelessWidget {
   final Map<String, dynamic> room;
   final List<String> messages;
+  final bool isSubscribed; // 👈 NOUVEAU
+  final VoidCallback onToggleSubscribe; // 👈 NOUVEAU
   final Function(String) onSend;
   final VoidCallback onBack;
 
   const _ChatStep({
-    required this.room, required this.messages, 
-    required this.onSend, required this.onBack
+    required this.room, required this.messages, required this.isSubscribed, 
+    required this.onToggleSubscribe, required this.onSend, required this.onBack
   });
 
   @override
   Widget build(BuildContext context) {
     final textController = TextEditingController();
     return Scaffold(
-      appBar: AppBar(leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new, size: 20), onPressed: onBack), title: Text(room['title'])),
+      appBar: AppBar(
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios_new, size: 20), onPressed: onBack), 
+        title: Text(room['title']),
+        // 👇 LA FAMEUSE CLOCHE EST LÀ 👇
+        actions: [
+          IconButton(
+            icon: Icon(isSubscribed ? Icons.notifications_active : Icons.notifications_off_outlined),
+            color: isSubscribed ? Colors.green : Colors.grey,
+            onPressed: onToggleSubscribe,
+            tooltip: isSubscribed ? "Désactiver les notifications" : "Activer les notifications",
+          )
+        ],
+      ),
       body: Column(children: [
         Expanded(
-          // 👇 Plus besoin de "RefreshIndicator" manuel car le temps réel fait le travail !
           child: ListView.builder(
             padding: const EdgeInsets.all(25),
             itemCount: messages.length, 
